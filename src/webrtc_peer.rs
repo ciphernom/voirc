@@ -1,10 +1,12 @@
+// src/webrtc_peer.rs
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_PCMU};
+use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_OPUS}; // CHANGE: MIME_TYPE_PCMU -> MIME_TYPE_OPUS
 use webrtc::api::APIBuilder;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
@@ -47,16 +49,18 @@ impl WebRtcPeer {
         ice_tx: mpsc::UnboundedSender<InternalSignal>, 
     ) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
+        
+        // REGISTER OPUS CODEC
         media_engine.register_codec(
             RTCRtpCodecParameters {
                 capability: RTCRtpCodecCapability {
-                    mime_type: MIME_TYPE_PCMU.to_owned(),
-                    clock_rate: 8000,
-                    channels: 1,
+                    mime_type: MIME_TYPE_OPUS.to_owned(), // Changed to Opus
+                    clock_rate: 48000,                    // Changed to 48kHz
+                    channels: 2,                          // Opus is usually stereo-capable
                     sdp_fmtp_line: "".to_owned(),
                     rtcp_feedback: vec![],
                 },
-                payload_type: 0,
+                payload_type: 111, // Standard dynamic payload type for Opus
                 ..Default::default()
             },
             RTPCodecType::Audio,
@@ -82,7 +86,7 @@ impl WebRtcPeer {
 
         let pc = Arc::new(api.new_peer_connection(config).await?);
 
-        // Handle ICE Candidates
+        // ICE Candidate handling
         let ice_tx_for_ice = ice_tx.clone();
         let nick_clone = nickname.clone();
         pc.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
@@ -102,7 +106,7 @@ impl WebRtcPeer {
             })
         }));
 
-        // FIX 2: Handle Incoming Audio (Packet based read)
+        // Incoming Audio Handling
         let pc_clone = Arc::clone(&pc);
         let nick_clone = nickname.clone();
         pc_clone.on_track(Box::new(move |track, _, _| {
@@ -110,16 +114,13 @@ impl WebRtcPeer {
             let nick = nick_clone.clone();
             Box::pin(async move {
                 info!("Audio track received from {}", nick);
-                // Buffer is technically not needed for read() if it returns Packet, 
-                // but required by trait signature.
                 let mut buf = vec![0u8; 1500]; 
                 loop {
-                    // track.read() returns (Packet, Attributes)
                     match track.read(&mut buf).await {
                         Ok((packet, _)) => {
                             let data = packet.payload;
                             if !data.is_empty() {
-                                // Send payload to mixer
+                                // Send raw Opus bytes to mixer
                                 let _ = mixer_tx.send(data.to_vec());
                             }
                         }
@@ -132,7 +133,7 @@ impl WebRtcPeer {
             })
         }));
 
-        // Connection State Monitoring
+        // State Monitoring
         let nick_clone = nickname.clone();
         let state_clone = Arc::clone(&state);
         let ice_tx_clone = ice_tx.clone();
@@ -155,9 +156,12 @@ impl WebRtcPeer {
             })
         }));
 
+        // Create Local Track for Opus
         let local_track = Arc::new(TrackLocalStaticRTP::new(
             RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_PCMU.to_owned(),
+                mime_type: MIME_TYPE_OPUS.to_owned(),
+                clock_rate: 48000,
+                channels: 2,
                 ..Default::default()
             },
             "audio".to_owned(),
@@ -208,6 +212,7 @@ impl WebRtcPeer {
     }
 
     pub async fn send_audio(&self, data: &[u8]) -> Result<()> {
+        // Just write the Opus bytes directly to the track
         self.local_audio_track.write(data).await?;
         Ok(())
     }

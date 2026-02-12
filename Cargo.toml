@@ -16,10 +16,15 @@ webrtc = "0.11"
 
 # Audio
 cpal = "0.15"
+opus = "0.3"
 
 # Terminal UI
 ratatui = "0.28"
 crossterm = "0.28"
+
+#gui
+eframe = "0.29"
+egui = "0.29"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
