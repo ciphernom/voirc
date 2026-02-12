@@ -1,25 +1,58 @@
 [package]
 name = "voirc"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
+# IRC
 irc = "0.15"
-futures-util = "0.3"
-uuid = { version = "1.0", features = ["v4"] }
-webrtc = "0.11"
+
+# Async runtime
 tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+
+# WebRTC
+webrtc = "0.11"
+
+# Audio
 cpal = "0.15"
+
+# Terminal UI
 ratatui = "0.28"
 crossterm = "0.28"
-anyhow = "1.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Added for file logging support
-tracing-appender = "0.2"
+
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
+
+# Utilities
+anyhow = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Config directories
+dirs = "5.0"
+
+# Date/time for recent servers
+chrono = "0.4"
+
+# UPnP for port forwarding
+igd = { version = "0.12", optional = true }
+
+# Optional: clipboard support
+arboard = { version = "3.4", optional = true }
+
+[features]
+default = ["upnp"]
+upnp = ["dep:igd"]
+clipboard = ["dep:arboard"]
 
 [profile.release]
 opt-level = 3
