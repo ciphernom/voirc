@@ -1,7 +1,6 @@
 // src/webrtc_peer.rs
 
 use anyhow::Result;
-use base64::{engine::general_purpose, Engine};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -24,6 +23,7 @@ use webrtc::rtp_transceiver::rtp_codec::{
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
 
+use crate::config::TurnServer;
 use crate::state::AppState;
 
 // ── Signaling types ──
@@ -83,19 +83,13 @@ fn setup_dc_receive(
             if msg.is_string {
                 let text = String::from_utf8_lossy(&msg.data);
                 if let Some(rest) = text.strip_prefix("FILE:") {
-                    // FILE:name:size
-                    if let Some((name, _size_str)) = rest.rsplit_once(':') {
+                    // FILE:name:size - header announcing a file transfer
+                    if let Some((name, size_str)) = rest.rsplit_once(':') {
+                        let size = size_str.parse::<usize>().unwrap_or(0);
                         *in_flight.lock().await = Some(InFlightFile {
                             name: name.to_string(),
-                            data: Vec::new(),
+                            data: Vec::with_capacity(size),
                         });
-                    }
-                } else if let Some(b64) = text.strip_prefix("FILE_CHUNK:") {
-                    if let Ok(decoded) = general_purpose::STANDARD.decode(b64.as_bytes()) {
-                        let mut guard = in_flight.lock().await;
-                        if let Some(ref mut file) = *guard {
-                            file.data.extend_from_slice(&decoded);
-                        }
                     }
                 } else if text.trim() == "FILE_END" {
                     if let Some(file) = in_flight.lock().await.take() {
@@ -106,9 +100,42 @@ fn setup_dc_receive(
                         });
                     }
                 }
+            } else {
+                // Binary message = file chunk data (no more base64 overhead)
+                let mut guard = in_flight.lock().await;
+                if let Some(ref mut file) = *guard {
+                    file.data.extend_from_slice(&msg.data);
+                }
             }
         })
     }));
+}
+
+/// Build ICE server list from STUN defaults + any configured TURN servers.
+fn build_ice_servers(turn_servers: &[TurnServer]) -> Vec<RTCIceServer> {
+    let mut servers = vec![
+        RTCIceServer {
+            urls: vec![
+                "stun:stun.l.google.com:19302".to_owned(),
+                "stun:stun1.l.google.com:19302".to_owned(),
+            ],
+            ..Default::default()
+        },
+    ];
+
+    // TURN servers are critical for users behind symmetric NATs
+    // (corporate WiFi, universities, some mobile carriers).
+    // Without these, those users simply cannot connect.
+    for ts in turn_servers {
+        servers.push(RTCIceServer {
+            urls: vec![ts.url.clone()],
+            username: ts.username.clone(),
+            credential: ts.credential.clone(),
+            ..Default::default()
+        });
+    }
+
+    servers
 }
 
 impl WebRtcPeer {
@@ -118,6 +145,7 @@ impl WebRtcPeer {
         mixer_tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
         ice_tx: mpsc::UnboundedSender<InternalSignal>,
         file_tx: mpsc::UnboundedSender<ReceivedFile>,
+        turn_servers: Vec<TurnServer>,
     ) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
 
@@ -145,15 +173,7 @@ impl WebRtcPeer {
             .build();
 
         let config = RTCConfiguration {
-            ice_servers: vec![RTCIceServer {
-                urls: vec![
-                    "stun:stun.l.google.com:19302".to_owned(),
-                    "stun:stun1.l.google.com:19302".to_owned(),
-                    "stun:stun2.l.google.com:19302".to_owned(),
-                    "stun:stun.ekiga.net:3478".to_owned(),
-                ],
-                ..Default::default()
-            }],
+            ice_servers: build_ice_servers(&turn_servers),
             ..Default::default()
         };
 
@@ -202,7 +222,7 @@ impl WebRtcPeer {
             })
         }));
 
-        // Connection state
+        // Connection state with exponential backoff reconnect
         let nick_c = nickname.clone();
         let state_c = Arc::clone(&state);
         let ice_tx_c = ice_tx.clone();
@@ -225,7 +245,7 @@ impl WebRtcPeer {
             })
         }));
 
-        // Data channel holder (answerer gets it via on_data_channel)
+        // Data channel holder
         let dc_holder: Arc<RwLock<Option<Arc<RTCDataChannel>>>> = Arc::new(RwLock::new(None));
 
         let dc_h = dc_holder.clone();
@@ -266,7 +286,6 @@ impl WebRtcPeer {
     }
 
     pub async fn create_offer(&self) -> Result<String> {
-        // Offerer creates the data channel (included in SDP)
         let dc = self.peer_connection.create_data_channel("files", None).await?;
         setup_dc_receive(&dc, self.nickname.clone(), self.file_tx.clone());
         *self.data_channel.write().await = Some(dc);
@@ -305,17 +324,19 @@ impl WebRtcPeer {
         Ok(())
     }
 
+    /// Send a file over the data channel using binary frames (no base64 overhead).
     pub async fn send_file(&self, name: &str, data: &[u8]) -> Result<()> {
         let dc = self.data_channel.read().await;
         let dc = dc.as_ref().ok_or_else(|| anyhow::anyhow!("Data channel not ready"))?;
 
-        // Header
+        // Text header with name and size
         dc.send_text(format!("FILE:{}:{}", name, data.len())).await?;
 
-        // Chunks as base64 text (avoids bytes crate dependency)
-        for chunk in data.chunks(12288) {
-            let encoded = general_purpose::STANDARD.encode(chunk);
-            dc.send_text(format!("FILE_CHUNK:{}", encoded)).await?;
+        // Binary chunks — 16KB each, no base64 encoding.
+        // Data channels support raw binary natively. The old base64 approach
+        // added 33% overhead for zero benefit.
+        for chunk in data.chunks(16384) {
+            dc.send(&bytes::Bytes::copy_from_slice(chunk)).await?;
         }
 
         dc.send_text("FILE_END".to_string()).await?;

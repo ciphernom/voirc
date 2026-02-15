@@ -25,6 +25,13 @@ impl ServerState {
             channels: HashMap::new(),
         }
     }
+
+    /// Find the address of a client by nickname.
+    fn find_addr_by_nick(&self, nick: &str) -> Option<SocketAddr> {
+        self.clients.iter()
+            .find(|(_, c)| c.nick.as_deref() == Some(nick))
+            .map(|(addr, _)| *addr)
+    }
 }
 
 pub struct EmbeddedServer;
@@ -86,7 +93,7 @@ async fn handle_connection(
         if let Some(client) = s.clients.remove(&addr) {
             if let Some(nick) = client.nick {
                 info!("Client disconnected: {}", nick);
-                
+
                 let mut peers_to_notify = HashSet::new();
                 for (_channel, members) in s.channels.iter_mut() {
                     if members.remove(&addr) {
@@ -96,7 +103,6 @@ async fn handle_connection(
                     }
                 }
 
-                // FIX: Standard QUIT message
                 let full_mask = format!("{}!voirc@127.0.0.1", nick);
                 let quit_msg = format!(":{} QUIT :Connection closed\r\n", full_mask);
                 for peer_addr in peers_to_notify {
@@ -107,7 +113,7 @@ async fn handle_connection(
             }
         }
     }
-    
+
     writer_handle.abort();
     Ok(())
 }
@@ -139,9 +145,7 @@ async fn process_command(cmd: &str, addr: SocketAddr, state: &Arc<Mutex<ServerSt
             if let Some(n) = nick {
                 let s = state.lock().unwrap();
                 if let Some(c) = s.clients.get(&addr) {
-                    // 1. Send Welcome
                     let _ = c.tx.send(format!(":voirc 001 {} :Welcome to Voirc\r\n", n));
-                    // 2. FIX: Send "ERR_NOMOTD" (422). This signals the client to start auto-joining.
                     let _ = c.tx.send(format!(":voirc 422 {} :MOTD File is missing\r\n", n));
                 }
             }
@@ -150,7 +154,7 @@ async fn process_command(cmd: &str, addr: SocketAddr, state: &Arc<Mutex<ServerSt
             if parts.len() > 1 {
                 let channel = parts[1];
                 let mut names_list = Vec::new();
-                
+
                 let nick_opt = {
                     let s = state.lock().unwrap();
                     s.clients.get(&addr).and_then(|c| c.nick.clone())
@@ -159,7 +163,7 @@ async fn process_command(cmd: &str, addr: SocketAddr, state: &Arc<Mutex<ServerSt
                 if let Some(n) = nick_opt {
                     let mut s = state.lock().unwrap();
                     s.channels.entry(channel.to_string()).or_default().insert(addr);
-                    
+
                     let full_mask = format!("{}!voirc@127.0.0.1", n);
                     let join_msg = format!(":{} JOIN {}\r\n", full_mask, channel);
 
@@ -185,18 +189,18 @@ async fn process_command(cmd: &str, addr: SocketAddr, state: &Arc<Mutex<ServerSt
         "PRIVMSG" => {
             if parts.len() > 2 {
                 let target = parts[1];
-                let msg_start = cmd.find(':').map(|i| i + 1).unwrap_or(0); 
+                let msg_start = cmd.find(':').map(|i| i + 1).unwrap_or(0);
                 let text = if msg_start > 0 { &cmd[msg_start..] } else { "" };
-                
+
                 let s = state.lock().unwrap();
                 let sender_nick = s.clients.get(&addr).and_then(|c| c.nick.clone()).unwrap_or_default();
-                
+
                 let full_mask = format!("{}!voirc@127.0.0.1", sender_nick);
                 let raw_msg = format!(":{} PRIVMSG {} :{}\r\n", full_mask, target, text);
 
                 if let Some(members) = s.channels.get(target) {
                     for member in members {
-                        if *member != addr { 
+                        if *member != addr {
                             if let Some(c) = s.clients.get(member) {
                                 let _ = c.tx.send(raw_msg.clone());
                             }
@@ -206,8 +210,66 @@ async fn process_command(cmd: &str, addr: SocketAddr, state: &Arc<Mutex<ServerSt
                     for client in s.clients.values() {
                         if client.nick.as_deref() == Some(target) {
                             let _ = client.tx.send(raw_msg.clone());
-                            break; 
+                            break;
                         }
+                    }
+                }
+            }
+        }
+        "KICK" => {
+            // KICK #channel target :reason
+            // Server-side kick: remove target from channel, notify everyone
+            if parts.len() >= 3 {
+                let channel = parts[1];
+                let target_nick = parts[2];
+                let reason = cmd.find(':').map(|i| &cmd[i+1..]).unwrap_or("Kicked");
+
+                let s = state.lock().unwrap();
+                let kicker_nick = s.clients.get(&addr).and_then(|c| c.nick.clone()).unwrap_or_default();
+
+                if let Some(_target_addr) = s.find_addr_by_nick(target_nick) {
+                    let full_mask = format!("{}!voirc@127.0.0.1", kicker_nick);
+                    let kick_msg = format!(":{} KICK {} {} :{}\r\n", full_mask, channel, target_nick, reason);
+
+                    // Notify all channel members including the target
+                    if let Some(members) = s.channels.get(channel) {
+                        for member in members {
+                            if let Some(c) = s.clients.get(member) {
+                                let _ = c.tx.send(kick_msg.clone());
+                            }
+                        }
+                    }
+
+                    // Note: actual removal happens when the kicked client
+                    // processes the KICK and disconnects. The embedded server
+                    // is minimal — we trust clients to behave.
+                }
+            }
+        }
+        "PART" => {
+            if parts.len() > 1 {
+                let channel = parts[1];
+                let nick_opt = {
+                    let s = state.lock().unwrap();
+                    s.clients.get(&addr).and_then(|c| c.nick.clone())
+                };
+
+                if let Some(n) = nick_opt {
+                    let mut s = state.lock().unwrap();
+                    let full_mask = format!("{}!voirc@127.0.0.1", n);
+                    let part_msg = format!(":{} PART {}\r\n", full_mask, channel);
+
+                    if let Some(members) = s.channels.get(channel) {
+                        for member in members.iter() {
+                            if *member != addr {
+                                if let Some(c) = s.clients.get(member) {
+                                    let _ = c.tx.send(part_msg.clone());
+                                }
+                            }
+                        }
+                    }
+                    if let Some(members) = s.channels.get_mut(channel) {
+                        members.remove(&addr);
                     }
                 }
             }

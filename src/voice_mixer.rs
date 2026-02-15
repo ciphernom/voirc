@@ -8,14 +8,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
-use tracing::error;
+use tracing::{error, info, warn};
 
 const SAMPLE_RATE: u32 = 48000;
 const CHANNELS_COUNT: u16 = 1;
 const FRAME_SIZE: usize = 960;
 
 pub struct VoiceMixer {
-    input_device: Device,
+    input_device: Option<Device>,
     output_device: Device,
     config: StreamConfig,
     incoming_audio: Arc<RwLock<Vec<Vec<f32>>>>,
@@ -53,8 +53,21 @@ impl PeerDecoders {
 impl VoiceMixer {
     pub fn new() -> Result<Self> {
         let host = cpal::default_host();
-        let input_device = host.default_input_device().ok_or_else(|| anyhow::anyhow!("No input device"))?;
-        let output_device = host.default_output_device().ok_or_else(|| anyhow::anyhow!("No output device"))?;
+
+        // Input device is optional — allows running without a mic for testing
+        let input_device = match host.default_input_device() {
+            Some(dev) => {
+                info!("Input device: {:?}", dev.name());
+                Some(dev)
+            }
+            None => {
+                warn!("No input device found — running in listen-only mode");
+                None
+            }
+        };
+
+        let output_device = host.default_output_device()
+            .ok_or_else(|| anyhow::anyhow!("No output device"))?;
 
         let config = StreamConfig {
             channels: CHANNELS_COUNT,
@@ -70,14 +83,28 @@ impl VoiceMixer {
         })
     }
 
-    pub fn start_input(&self, audio_tx: mpsc::UnboundedSender<Vec<u8>>) -> Result<Stream> {
+    /// Returns true if we have a microphone available.
+    pub fn has_input(&self) -> bool {
+        self.input_device.is_some()
+    }
+
+    /// Start capturing from the microphone. Returns None if no mic is available.
+    pub fn start_input(&self, audio_tx: mpsc::UnboundedSender<Vec<u8>>) -> Result<Option<Stream>> {
+        let input_device = match &self.input_device {
+            Some(dev) => dev,
+            None => {
+                info!("No mic — skipping input stream");
+                return Ok(None);
+            }
+        };
+
         let config = self.config.clone();
         let mut encoder = Encoder::new(SAMPLE_RATE, Channels::Mono, Application::Voip)?;
         encoder.set_inband_fec(true)?;
         encoder.set_dtx(true)?;
         let mut input_buffer: Vec<f32> = Vec::with_capacity(FRAME_SIZE * 2);
 
-        let stream = self.input_device.build_input_stream(
+        let stream = input_device.build_input_stream(
             &config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 input_buffer.extend_from_slice(data);
@@ -98,7 +125,7 @@ impl VoiceMixer {
             None,
         )?;
         stream.play()?;
-        Ok(stream)
+        Ok(Some(stream))
     }
 
     pub fn start_output(&self) -> Result<Stream> {

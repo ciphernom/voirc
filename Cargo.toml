@@ -53,6 +53,7 @@ igd = { version = "0.12", optional = true }
 
 # Optional: clipboard support
 arboard = { version = "3.4", optional = true }
+bytes = "1.11.1"
 
 [features]
 default = ["upnp"]

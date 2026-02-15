@@ -9,6 +9,8 @@ mod config;
 mod magic_link;
 mod upnp;
 mod gui;
+mod topology;
+mod moderation;
 
 use anyhow::Result;
 use tracing::info;

@@ -2,6 +2,8 @@
 
 use anyhow::Result;
 use std::net::Ipv4Addr;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tracing::{info, warn};
 
 pub struct PortForwarder;
@@ -20,12 +22,11 @@ impl PortForwarder {
                     port,
                 );
 
-                // Try to add port mapping
                 match gateway.add_port(
                     igd::PortMappingProtocol::TCP,
                     port,
-                    local_addr, // Pass SocketAddrV4 directly
-                    3600, // Lease duration: 1 hour
+                    local_addr, 
+                    3600, 
                     "Voirc IRC Server",
                 ) {
                     Ok(_) => {
@@ -45,23 +46,56 @@ impl PortForwarder {
         }
     }
 
-    /// Get the external IP address
+    /// Get the external IP address (UPnP -> External HTTP -> Local Fallback)
     pub async fn get_external_ip() -> Result<String> {
-        match igd::search_gateway(Default::default()) {
-            Ok(gateway) => {
-                match gateway.get_external_ip() {
-                    Ok(ip) => Ok(ip.to_string()),
-                    Err(_) => {
-                        // Fallback to STUN-based detection or local IP
-                        Ok(Self::get_local_ip()?.to_string())
-                    }
-                }
-            }
-            Err(_) => {
-                // Fallback to local IP
-                Ok(Self::get_local_ip()?.to_string())
+        // 1. Try UPnP first
+        if let Ok(gateway) = igd::search_gateway(Default::default()) {
+            if let Ok(ip) = gateway.get_external_ip() {
+                info!("Obtained external IP via UPnP: {}", ip);
+                return Ok(ip.to_string());
             }
         }
+
+        // 2. Try external HTTP service (api.ipify.org)
+        // This is a manual HTTP request to avoid adding 'reqwest' dependency
+        info!("UPnP IP lookup failed, trying api.ipify.org...");
+        if let Ok(ip) = Self::fetch_public_ip_http().await {
+            info!("Obtained external IP via HTTP: {}", ip);
+            return Ok(ip);
+        }
+
+        // 3. Fallback to local IP
+        warn!("External IP lookup failed. Using local IP.");
+        Ok(Self::get_local_ip()?.to_string())
+    }
+
+    /// Manually fetch public IP over TCP to avoid heavy dependencies
+    async fn fetch_public_ip_http() -> Result<String> {
+        let addr = "api.ipify.org:80";
+        let mut stream = TcpStream::connect(addr).await?;
+        
+        let request = format!(
+            "GET / HTTP/1.1\r\n\
+             Host: api.ipify.org\r\n\
+             Connection: close\r\n\
+             \r\n"
+        );
+        
+        stream.write_all(request.as_bytes()).await?;
+        
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await?;
+        
+        // Simple parser to separate headers from body (split by double CRLF)
+        if let Some((_, body)) = response.split_once("\r\n\r\n") {
+            let ip = body.trim().to_string();
+            // Basic validation: ensure it looks like an IP (x.x.x.x)
+            if ip.split('.').count() == 4 {
+                return Ok(ip);
+            }
+        }
+        
+        Err(anyhow::anyhow!("Failed to parse IP from HTTP response"))
     }
 
     /// Get local IP address
@@ -77,7 +111,6 @@ impl PortForwarder {
         }
     }
 
-    /// Remove port forwarding when done
     #[allow(dead_code)]
     pub async fn remove_port(port: u16) -> Result<()> {
         if let Ok(gateway) = igd::search_gateway(Default::default()) {

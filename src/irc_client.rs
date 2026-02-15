@@ -7,13 +7,16 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 use uuid::Uuid;
 
+use crate::config::Role;
 use crate::state::AppState;
 
 pub enum IrcEvent {
-    UserJoined(String),
+    UserJoined { nick: String, role: Role },
     UserLeft(String),
     WebRtcSignal { from: String, payload: String },
     ChatMessage { channel: String, from: String, text: String },
+    /// Moderation action broadcast from a mod/host
+    ModAction { from: String, action: String, target: String },
 }
 
 struct FragmentBuffer {
@@ -75,6 +78,18 @@ impl IrcClient {
         ))
     }
 
+    /// Announce our role to the channel so peers know our topology position.
+    pub fn announce_role(&self, channel: &str, role: Role) -> Result<()> {
+        self.sender.send_privmsg(channel, &format!("VOIRC_ROLE:{}", role.as_str()))?;
+        Ok(())
+    }
+
+    /// Send a moderation action to the channel.
+    pub fn send_mod_action(&self, channel: &str, action: &str, target: &str) -> Result<()> {
+        self.sender.send_privmsg(channel, &format!("VOIRC_MOD:{}:{}", action, target))?;
+        Ok(())
+    }
+
     pub async fn run(&self, mut stream: irc::client::ClientStream) -> Result<()> {
         while let Some(message) = stream.next().await.transpose()? {
             info!("RX: {:?}", message);
@@ -96,7 +111,11 @@ impl IrcClient {
                 if let Some(Prefix::Nickname(ref nick, _, _)) = message.prefix {
                     info!("Processing JOIN for {}", nick);
                     if nick != &self.nickname {
-                        self.event_tx.send(IrcEvent::UserJoined(nick.clone()))?;
+                        // Default to Peer role; they'll announce their real role shortly
+                        self.event_tx.send(IrcEvent::UserJoined {
+                            nick: nick.clone(),
+                            role: Role::Peer,
+                        })?;
                     }
                 }
             }
@@ -107,7 +126,10 @@ impl IrcClient {
                         let clean_name = name.trim_start_matches(|c| c == '@' || c == '+');
                         if clean_name != self.nickname && !clean_name.is_empty() {
                             info!("Found existing peer: {}", clean_name);
-                            self.event_tx.send(IrcEvent::UserJoined(clean_name.to_string()))?;
+                            self.event_tx.send(IrcEvent::UserJoined {
+                                nick: clean_name.to_string(),
+                                role: Role::Peer,
+                            })?;
                         }
                     }
                 }
@@ -122,6 +144,20 @@ impl IrcClient {
                 if let Some(Prefix::Nickname(ref nick, _, _)) = message.prefix {
                     if text.starts_with("WRTC:") {
                         self.handle_fragment(nick, text)?;
+                    } else if let Some(role_str) = text.strip_prefix("VOIRC_ROLE:") {
+                        // Peer announcing their role
+                        let role = Role::from_str(role_str.trim());
+                        self.state.set_peer_role(nick, role).await;
+                        info!("Peer {} announced role: {:?}", nick, role);
+                    } else if let Some(rest) = text.strip_prefix("VOIRC_MOD:") {
+                        // Moderation action from a mod/host
+                        if let Some((action, target_nick)) = rest.split_once(':') {
+                            self.event_tx.send(IrcEvent::ModAction {
+                                from: nick.clone(),
+                                action: action.to_string(),
+                                target: target_nick.to_string(),
+                            })?;
+                        }
                     } else {
                         self.event_tx.send(IrcEvent::ChatMessage {
                             channel: target.clone(),
