@@ -4,7 +4,7 @@ use futures_util::stream::StreamExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tracing::{error, info}; // Removed 'warn'
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -13,8 +13,7 @@ pub enum IrcEvent {
     UserJoined(String),
     UserLeft(String),
     WebRtcSignal { from: String, payload: String },
-    ChatMessage { from: String, text: String },
-    ConnectionFailed(String), // For automatic re-dial
+    ChatMessage { channel: String, from: String, text: String },
 }
 
 struct FragmentBuffer {
@@ -38,7 +37,6 @@ impl IrcClient {
         channel: String,
         state: Arc<AppState>,
     ) -> Result<(Self, irc::client::ClientStream, mpsc::UnboundedReceiver<IrcEvent>)> {
-        
         let (server, port) = if let Some((h, p)) = connection_string.split_once(':') {
             (h.to_string(), p.parse::<u16>().ok())
         } else {
@@ -56,12 +54,10 @@ impl IrcClient {
 
         let mut client = Client::from_config(config).await?;
         client.identify()?;
-        
         client.send_join(&channel)?;
 
         let stream = client.stream()?;
         let sender = client.sender();
-
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         info!("Connected to IRC server, joining {}", channel);
@@ -74,15 +70,14 @@ impl IrcClient {
                 fragments: Mutex::new(HashMap::new()),
                 nickname,
             },
-            stream, 
+            stream,
             event_rx,
         ))
     }
 
     pub async fn run(&self, mut stream: irc::client::ClientStream) -> Result<()> {
         while let Some(message) = stream.next().await.transpose()? {
-            info!("RX: {:?}", message); 
-
+            info!("RX: {:?}", message);
             if let Err(e) = self.handle_message(message).await {
                 error!("Error handling IRC message: {}", e);
             }
@@ -99,20 +94,20 @@ impl IrcClient {
         match message.command {
             Command::JOIN(ref _channel, _, _) => {
                 if let Some(Prefix::Nickname(ref nick, _, _)) = message.prefix {
-                    info!("Processing JOIN for {}", nick); 
+                    info!("Processing JOIN for {}", nick);
                     if nick != &self.nickname {
                         self.event_tx.send(IrcEvent::UserJoined(nick.clone()))?;
                     }
                 }
             }
             Command::Response(Response::RPL_NAMREPLY, ref args) => {
-                info!("Processing NAMES list: {:?}", args); 
+                info!("Processing NAMES list: {:?}", args);
                 if let Some(names) = args.last() {
                     for name in names.split_whitespace() {
                         let clean_name = name.trim_start_matches(|c| c == '@' || c == '+');
                         if clean_name != self.nickname && !clean_name.is_empty() {
-                             info!("Found existing peer: {}", clean_name);
-                             self.event_tx.send(IrcEvent::UserJoined(clean_name.to_string()))?;
+                            info!("Found existing peer: {}", clean_name);
+                            self.event_tx.send(IrcEvent::UserJoined(clean_name.to_string()))?;
                         }
                     }
                 }
@@ -123,18 +118,15 @@ impl IrcClient {
                     self.state.remove_peer(nick).await;
                 }
             }
-            Command::PRIVMSG(ref _target, ref text) => {
+            Command::PRIVMSG(ref target, ref text) => {
                 if let Some(Prefix::Nickname(ref nick, _, _)) = message.prefix {
                     if text.starts_with("WRTC:") {
                         self.handle_fragment(nick, text)?;
                     } else {
-                        let from = nick.clone();
-                        let text_content = text.clone();
-                        let msg = format!("<{}> {}", from, text_content);
-                        self.state.add_message(msg).await;
                         self.event_tx.send(IrcEvent::ChatMessage {
-                            from,
-                            text: text_content,
+                            channel: target.clone(),
+                            from: nick.clone(),
+                            text: text.clone(),
                         })?;
                     }
                 }
@@ -146,12 +138,12 @@ impl IrcClient {
 
     fn handle_fragment(&self, sender: &str, text: &str) -> Result<()> {
         let content = text.strip_prefix("WRTC:").unwrap_or("");
-        
+
         let end_bracket = content.find(']').unwrap_or(0);
         if end_bracket == 0 || !content.starts_with('[') { return Ok(()); }
-        
+
         let header = &content[1..end_bracket];
-        let payload = &content[end_bracket+1..];
+        let payload = &content[end_bracket + 1..];
 
         let parts: Vec<&str> = header.split('|').collect();
         if parts.len() != 2 { return Ok(()); }
@@ -161,7 +153,7 @@ impl IrcClient {
 
         let seq: usize = counts[0].parse().unwrap_or(0);
         let total: usize = counts[1].parse().unwrap_or(0);
-        
+
         let key = format!("{}:{}", sender, msg_id);
 
         let mut fragments = self.fragments.lock().unwrap();
@@ -183,7 +175,7 @@ impl IrcClient {
                 }
             }
             fragments.remove(&key);
-            
+
             self.event_tx.send(IrcEvent::WebRtcSignal {
                 from: sender.to_string(),
                 payload: full_payload,
@@ -210,6 +202,16 @@ impl IrcClient {
 
     pub fn send_message(&self, channel: &str, text: &str) -> Result<()> {
         self.sender.send_privmsg(channel, text)?;
+        Ok(())
+    }
+
+    pub fn join_channel(&self, channel: &str) -> Result<()> {
+        self.sender.send_join(channel)?;
+        Ok(())
+    }
+
+    pub fn part_channel(&self, channel: &str) -> Result<()> {
+        self.sender.send(Command::PART(channel.to_string(), None))?;
         Ok(())
     }
 }

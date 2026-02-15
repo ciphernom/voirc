@@ -78,6 +78,7 @@ impl PortForwarder {
     }
 
     /// Remove port forwarding when done
+    #[allow(dead_code)]
     pub async fn remove_port(port: u16) -> Result<()> {
         if let Ok(gateway) = igd::search_gateway(Default::default()) {
             let _ = gateway.remove_port(igd::PortMappingProtocol::TCP, port);
