@@ -1,66 +1,21 @@
-# Design & Architecture
+# Design
 
-## 1. Signaling Protocol (IRC Tunneling)
+**Signaling**
+Tunneled over standard IRC (TCP). Large SDP payloads are fragmented to fit the 512-byte IRC message limit using the format `WRTC:[seq/total|id]payload`.
 
-Voirc uses a standard IRC server as the signaling plane for WebRTC.
+**Topology**
+Full mesh. Connection collisions are avoided by nickname comparison: the lexicographically smaller nickname sends the Offer, the larger waits to Answer.
+Will implement Plumtree (or similar) to assist with scaling in future versions.
 
-* **Discovery:** Peers join a specific IRC channel to discover IP addresses/Ports via standard `JOIN`/`NAMES` messages.
-* **SDP Exchange:** WebRTC Offer/Answer and ICE candidates are serialized to JSON and sent via IRC `PRIVMSG`.
-* **Fragmentation:** IRC message limits (512 bytes) require large SDP packets to be fragmented.
-* **Format:** `WRTC:[seq/total|msg_id]payload`
-* **Reassembly:** Receiver buffers fragments by `msg_id` until `total` is reached before triggering WebRTC negotiation.
+**Audio**
+Opus codec (VoIP profile, 48kHz mono).
+Mixing: Software summation. Normalized by `1/sqrt(N)` to prevent clipping. Improvements are required. 
 
+**Files**
+Transferred via WebRTC Data Channels (ordered), not IRC.
+Protocol: `FILE:name:size` header → Base64 chunks (12KB) → `FILE_END`.
 
-
-## 2. Audio Architecture
-
-Audio is handled via `cpal` (hardware I/O) and `opus` (compression).
-
-* **Input (Capture):**
-* Captured mono at 48kHz.
-* VAD (Voice Activity Detection) based on RMS threshold (>0.01).
-* Encoded via Opus (VoIP profile) and sent to the `mpsc` channel.
-
-
-* **Output (Render):**
-* Incoming packets are decoded to `f32` PCM.
-* **Software Mixing:** Concurrent audio streams are summed and normalized by `1/sqrt(N)` to prevent clipping.
-
-
-
-## 3. Network Topology
-
-* **Mesh Network:** Every client establishes a direct WebRTC `PeerConnection` with every other client in the channel.
-* **Transport:**
-* **Signaling:** TCP (IRC).
-* **Media/Data:** UDP (WebRTC/ICE).
-
-
-* **NAT Traversal:** Uses STUN (Google/Ekiga public servers) and local UPnP/IGD for the hosting node.
-
-## 4. Data Transfer
-
-Files are **not** sent over IRC.
-
-* **Mechanism:** WebRTC Data Channels (`ordered: true`).
-* **Protocol:**
-1. Header: `FILE:name:size`
-2. Chunks: Base64 encoded payload.
-3. Footer: `FILE_END`.
-
-
-
-## 5. Magic Link Format
-
-Configuration is shared via Base64-encoded JSON strings.
-
-* **Schema:** `voirc://<base64_json>`
-* **JSON Structure:**
-```json
-{
-  "host": "1.2.3.4",
-  "port": 6667,
-  "channels": ["#lobby"]
-}
-
-```
+**Network**
+Host: Auto-forwards port via UPnP (IGD).
+Peers: NAT traversal via public STUN (Google/Ekiga).
+Config: `voirc://` links are Base64-encoded JSON containing host, port, and channels.
