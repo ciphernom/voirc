@@ -1,16 +1,24 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
-use tracing::{error, info};
+use tokio::net::{TcpListener};
+use tokio::sync::{mpsc, RwLock};
+use tokio_rustls::TlsAcceptor;
+use tracing::{error, info, warn};
+
+use crate::tls::CertInfo;
+
+const MAX_MSG_LEN: usize = 512;
+const MAX_CLIENTS_PER_IP: usize = 5;
+const MAX_TOTAL_CLIENTS: usize = 100;
 
 type Tx = mpsc::UnboundedSender<String>;
 
 struct Client {
     nick: Option<String>,
     tx: Tx,
+    ip: std::net::IpAddr,
 }
 
 struct ServerState {
@@ -26,11 +34,14 @@ impl ServerState {
         }
     }
 
-    /// Find the address of a client by nickname.
     fn find_addr_by_nick(&self, nick: &str) -> Option<SocketAddr> {
         self.clients.iter()
             .find(|(_, c)| c.nick.as_deref() == Some(nick))
             .map(|(addr, _)| *addr)
+    }
+
+    fn count_ip(&self, ip: std::net::IpAddr) -> usize {
+        self.clients.values().filter(|c| c.ip == ip).count()
     }
 }
 
@@ -38,17 +49,59 @@ pub struct EmbeddedServer;
 
 impl EmbeddedServer {
     pub async fn run(port: u16) -> std::io::Result<()> {
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-        info!("Embedded IRC Server listening on 0.0.0.0:{}", port);
+        Self::run_inner(port, None).await
+    }
 
-        let state = Arc::new(Mutex::new(ServerState::new()));
+    pub async fn run_tls(port: u16, cert_info: &CertInfo) -> std::io::Result<()> {
+        let tls_config = crate::tls::server_config(cert_info)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let acceptor = TlsAcceptor::from(tls_config);
+        Self::run_inner(port, Some(acceptor)).await
+    }
+
+    async fn run_inner(port: u16, acceptor: Option<TlsAcceptor>) -> std::io::Result<()> {
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+        let mode = if acceptor.is_some() { "TLS" } else { "plaintext" };
+        info!("Embedded IRC Server listening on 0.0.0.0:{} ({})", port, mode);
+
+        let state = Arc::new(RwLock::new(ServerState::new()));
 
         loop {
             let (socket, addr) = listener.accept().await?;
             let state = Arc::clone(&state);
 
+            // Connection limit checks
+            {
+                let s = state.read().await;
+                if s.clients.len() >= MAX_TOTAL_CLIENTS {
+                    warn!("Max clients reached, rejecting {}", addr);
+                    continue;
+                }
+                if s.count_ip(addr.ip()) >= MAX_CLIENTS_PER_IP {
+                    warn!("Max clients per IP reached for {}", addr.ip());
+                    continue;
+                }
+            }
+
+            let acc = acceptor.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(socket, addr, state).await {
+                let result = if let Some(acceptor) = acc {
+                    match acceptor.accept(socket).await {
+                        Ok(tls_stream) => {
+                            let (reader, writer) = tokio::io::split(tls_stream);
+                            handle_connection_io(reader, writer, addr, state).await
+                        }
+                        Err(e) => {
+                            warn!("TLS handshake failed for {}: {}", addr, e);
+                            return;
+                        }
+                    }
+                } else {
+                    let (reader, writer) = socket.into_split();
+                    handle_connection_io(reader, writer, addr, state).await
+                };
+
+                if let Err(e) = result {
                     error!("Connection error for {}: {}", addr, e);
                 }
             });
@@ -56,18 +109,22 @@ impl EmbeddedServer {
     }
 }
 
-async fn handle_connection(
-    conn: TcpStream,
+async fn handle_connection_io<R, W>(
+    reader: R,
+    mut writer: W,
     addr: SocketAddr,
-    state: Arc<Mutex<ServerState>>,
-) -> std::io::Result<()> {
-    let (reader, mut writer) = conn.into_split();
+    state: Arc<RwLock<ServerState>>,
+) -> std::io::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let mut reader = BufReader::new(reader);
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
     {
-        let mut s = state.lock().unwrap();
-        s.clients.insert(addr, Client { nick: None, tx });
+        let mut s = state.write().await;
+        s.clients.insert(addr, Client { nick: None, tx, ip: addr.ip() });
     }
 
     let writer_handle = tokio::spawn(async move {
@@ -80,6 +137,10 @@ async fn handle_connection(
 
     let mut line = String::new();
     while reader.read_line(&mut line).await? > 0 {
+        if line.len() > MAX_MSG_LEN {
+            line.clear();
+            continue;
+        }
         let trimmed = line.trim();
         if !trimmed.is_empty() {
             process_command(trimmed, addr, &state).await;
@@ -89,7 +150,7 @@ async fn handle_connection(
 
     // Cleanup
     {
-        let mut s = state.lock().unwrap();
+        let mut s = state.write().await;
         if let Some(client) = s.clients.remove(&addr) {
             if let Some(nick) = client.nick {
                 info!("Client disconnected: {}", nick);
@@ -118,32 +179,29 @@ async fn handle_connection(
     Ok(())
 }
 
-async fn process_command(cmd: &str, addr: SocketAddr, state: &Arc<Mutex<ServerState>>) {
+async fn process_command(cmd: &str, addr: SocketAddr, state: &Arc<RwLock<ServerState>>) {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     if parts.is_empty() { return; }
 
     match parts[0] {
         "CAP" => {
-            if let Some(c) = state.lock().unwrap().clients.get(&addr) {
+            let s = state.read().await;
+            if let Some(c) = s.clients.get(&addr) {
                 let _ = c.tx.send(":voirc CAP * LS :\r\n".to_string());
             }
         }
         "NICK" => {
             if parts.len() > 1 {
-                let mut s = state.lock().unwrap();
+                let mut s = state.write().await;
                 if let Some(c) = s.clients.get_mut(&addr) {
                     c.nick = Some(parts[1].to_string());
                 }
             }
         }
         "USER" => {
-            let nick = {
-                let s = state.lock().unwrap();
-                s.clients.get(&addr).and_then(|c| c.nick.clone())
-            };
-
+            let s = state.read().await;
+            let nick = s.clients.get(&addr).and_then(|c| c.nick.clone());
             if let Some(n) = nick {
-                let s = state.lock().unwrap();
                 if let Some(c) = s.clients.get(&addr) {
                     let _ = c.tx.send(format!(":voirc 001 {} :Welcome to Voirc\r\n", n));
                     let _ = c.tx.send(format!(":voirc 422 {} :MOTD File is missing\r\n", n));
@@ -152,22 +210,22 @@ async fn process_command(cmd: &str, addr: SocketAddr, state: &Arc<Mutex<ServerSt
         }
         "JOIN" => {
             if parts.len() > 1 {
-                let channel = parts[1];
+                let channel = parts[1].to_string();
                 let mut names_list = Vec::new();
 
                 let nick_opt = {
-                    let s = state.lock().unwrap();
+                    let s = state.read().await;
                     s.clients.get(&addr).and_then(|c| c.nick.clone())
                 };
 
                 if let Some(n) = nick_opt {
-                    let mut s = state.lock().unwrap();
-                    s.channels.entry(channel.to_string()).or_default().insert(addr);
+                    let mut s = state.write().await;
+                    s.channels.entry(channel.clone()).or_default().insert(addr);
 
                     let full_mask = format!("{}!voirc@127.0.0.1", n);
                     let join_msg = format!(":{} JOIN {}\r\n", full_mask, channel);
 
-                    if let Some(members) = s.channels.get(channel) {
+                    if let Some(members) = s.channels.get(&channel) {
                         for member in members {
                             if let Some(c) = s.clients.get(member) {
                                 let _ = c.tx.send(join_msg.clone());
@@ -192,7 +250,7 @@ async fn process_command(cmd: &str, addr: SocketAddr, state: &Arc<Mutex<ServerSt
                 let msg_start = cmd.find(':').map(|i| i + 1).unwrap_or(0);
                 let text = if msg_start > 0 { &cmd[msg_start..] } else { "" };
 
-                let s = state.lock().unwrap();
+                let s = state.read().await;
                 let sender_nick = s.clients.get(&addr).and_then(|c| c.nick.clone()).unwrap_or_default();
 
                 let full_mask = format!("{}!voirc@127.0.0.1", sender_nick);
@@ -217,49 +275,44 @@ async fn process_command(cmd: &str, addr: SocketAddr, state: &Arc<Mutex<ServerSt
             }
         }
         "KICK" => {
-            // KICK #channel target :reason
-            // Server-side kick: remove target from channel, notify everyone
             if parts.len() >= 3 {
-                let channel = parts[1];
+                let channel = parts[1].to_string();
                 let target_nick = parts[2];
                 let reason = cmd.find(':').map(|i| &cmd[i+1..]).unwrap_or("Kicked");
 
-                let s = state.lock().unwrap();
+                let mut s = state.write().await;
                 let kicker_nick = s.clients.get(&addr).and_then(|c| c.nick.clone()).unwrap_or_default();
 
-                if let Some(_target_addr) = s.find_addr_by_nick(target_nick) {
+                if let Some(target_addr) = s.find_addr_by_nick(target_nick) {
                     let full_mask = format!("{}!voirc@127.0.0.1", kicker_nick);
                     let kick_msg = format!(":{} KICK {} {} :{}\r\n", full_mask, channel, target_nick, reason);
 
-                    // Notify all channel members including the target
-                    if let Some(members) = s.channels.get(channel) {
-                        for member in members {
+                    if let Some(members) = s.channels.get(&channel) {
+                        for member in members.iter() {
                             if let Some(c) = s.clients.get(member) {
                                 let _ = c.tx.send(kick_msg.clone());
                             }
                         }
                     }
 
-                    // Note: actual removal happens when the kicked client
-                    // processes the KICK and disconnects. The embedded server
-                    // is minimal — we trust clients to behave.
+                    // Actually remove the target from the channel server-side
+                    if let Some(members) = s.channels.get_mut(&channel) {
+                        members.remove(&target_addr);
+                    }
                 }
             }
         }
         "PART" => {
             if parts.len() > 1 {
-                let channel = parts[1];
-                let nick_opt = {
-                    let s = state.lock().unwrap();
-                    s.clients.get(&addr).and_then(|c| c.nick.clone())
-                };
+                let channel = parts[1].to_string();
+                let mut s = state.write().await;
+                let nick_opt = s.clients.get(&addr).and_then(|c| c.nick.clone());
 
                 if let Some(n) = nick_opt {
-                    let mut s = state.lock().unwrap();
                     let full_mask = format!("{}!voirc@127.0.0.1", n);
                     let part_msg = format!(":{} PART {}\r\n", full_mask, channel);
 
-                    if let Some(members) = s.channels.get(channel) {
+                    if let Some(members) = s.channels.get(&channel) {
                         for member in members.iter() {
                             if *member != addr {
                                 if let Some(c) = s.clients.get(member) {
@@ -268,19 +321,19 @@ async fn process_command(cmd: &str, addr: SocketAddr, state: &Arc<Mutex<ServerSt
                             }
                         }
                     }
-                    if let Some(members) = s.channels.get_mut(channel) {
+                    if let Some(members) = s.channels.get_mut(&channel) {
                         members.remove(&addr);
                     }
                 }
             }
         }
         "PING" => {
-             if parts.len() > 1 {
-                 let s = state.lock().unwrap();
-                 if let Some(c) = s.clients.get(&addr) {
-                     let _ = c.tx.send(format!("PONG {}\r\n", parts[1]));
-                 }
-             }
+            if parts.len() > 1 {
+                let s = state.read().await;
+                if let Some(c) = s.clients.get(&addr) {
+                    let _ = c.tx.send(format!("PONG {}\r\n", parts[1]));
+                }
+            }
         }
         _ => {}
     }

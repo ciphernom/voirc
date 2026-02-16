@@ -1,5 +1,3 @@
-// src/gui.rs
-
 use egui::{CentralPanel, Context, RichText, ScrollArea, TextEdit, TopBottomPanel};
 use std::collections::HashMap;
 use std::path::Path;
@@ -7,18 +5,19 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
-use crate::config::{Role, TurnServer, UserConfig};
+use crate::config::{ConnState, Role, TurnServer, UserConfig};
 use crate::irc_client::{IrcClient, IrcEvent};
 use crate::irc_server::EmbeddedServer;
 use crate::magic_link::ConnectionInfo;
 use crate::moderation;
+use crate::relay::{AudioRelay, RelayConnection};
 use crate::state::AppState;
+use crate::tls;
 use crate::topology;
 use crate::upnp::PortForwarder;
 use crate::voice_mixer::{PeerDecoders, VoiceMixer};
 use crate::webrtc_peer::{InternalSignal, ReceivedFile, WebRtcPeer, WebRtcSignal};
 
-/// Open a file or folder with the OS default handler
 fn open_path(path: &Path) {
     #[cfg(target_os = "linux")]
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
@@ -27,8 +26,6 @@ fn open_path(path: &Path) {
     #[cfg(target_os = "windows")]
     let _ = std::process::Command::new("explorer").arg(path).spawn();
 }
-
-// ── Screens ──
 
 #[derive(Debug, Clone, PartialEq)]
 enum Screen {
@@ -40,8 +37,6 @@ enum Screen {
     InCall,
 }
 
-// ── Commands from GUI → event loop ──
-
 enum CallCommand {
     SendMessage(String),
     SwitchChannel(String),
@@ -50,28 +45,22 @@ enum CallCommand {
     Shutdown,
 }
 
-// ── Call state shared between GUI and async tasks ──
-
 struct CallState {
     state: Arc<AppState>,
     command_tx: mpsc::UnboundedSender<CallCommand>,
     channels: Arc<RwLock<Vec<String>>>,
     current_channel: Arc<RwLock<String>>,
     nickname: String,
-    /// The shareable invite link (external IP version when available)
     invite_link: Arc<RwLock<Option<String>>>,
     _mixer: Arc<VoiceMixer>,
     _input_stream: Option<cpal::Stream>,
     _output_stream: cpal::Stream,
 }
 
-// ── App ──
-
 pub struct VoircApp {
     config: UserConfig,
     screen: Screen,
 
-    // Host
     host_port: String,
     host_channels: String,
     host_error: Option<String>,
@@ -79,22 +68,21 @@ pub struct VoircApp {
     host_link_external: Arc<RwLock<Option<String>>>,
     link_copied: bool,
 
-    // Join
     join_input: String,
     join_error: Option<String>,
 
-    // Settings
     settings_name: String,
     settings_turn_url: String,
     settings_turn_user: String,
     settings_turn_cred: String,
     selected_recent: usize,
 
-    // In Call
     chat_input: String,
     new_channel_input: String,
     call_state: Option<Arc<CallState>>,
     file_status: Option<String>,
+
+    upnp_warning: Option<String>,
 }
 
 impl VoircApp {
@@ -119,16 +107,15 @@ impl VoircApp {
             new_channel_input: String::new(),
             call_state: None,
             file_status: None,
+            upnp_warning: None,
         }
     }
-
-    // ── Dashboard ──
 
     fn render_dashboard(&mut self, ctx: &Context) {
         CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
-                ui.heading(RichText::new("🎤 Voirc").size(32.0).strong());
+                ui.heading(RichText::new("Voirc").size(32.0).strong());
                 ui.add_space(10.0);
                 ui.label(RichText::new(format!("Welcome, {}", self.config.display_name)).size(18.0));
                 ui.add_space(40.0);
@@ -136,23 +123,22 @@ impl VoircApp {
 
             ui.vertical_centered(|ui| {
                 let sz = egui::vec2(300.0, 50.0);
-                if ui.add_sized(sz, egui::Button::new(RichText::new("🏠 Host a Room").size(16.0))).clicked() {
+                if ui.add_sized(sz, egui::Button::new(RichText::new("Host a Room").size(16.0))).clicked() {
                     self.screen = Screen::HostSetup;
                 }
                 ui.add_space(10.0);
-                if ui.add_sized(sz, egui::Button::new(RichText::new("🔗 Join a Room").size(16.0))).clicked() {
+                if ui.add_sized(sz, egui::Button::new(RichText::new("Join a Room").size(16.0))).clicked() {
                     self.screen = Screen::JoinPrompt;
                 }
                 ui.add_space(10.0);
                 if !self.config.recent_servers.is_empty() {
-                    if ui.add_sized(sz, egui::Button::new(RichText::new("📋 Recent Servers").size(16.0))).clicked() {
+                    if ui.add_sized(sz, egui::Button::new(RichText::new("Recent Servers").size(16.0))).clicked() {
                         self.screen = Screen::RecentServers;
                     }
                     ui.add_space(10.0);
                 }
-                if ui.add_sized(sz, egui::Button::new(RichText::new("⚙️ Settings").size(16.0))).clicked() {
+                if ui.add_sized(sz, egui::Button::new(RichText::new("Settings").size(16.0))).clicked() {
                     self.settings_name = self.config.display_name.clone();
-                    // Pre-fill TURN settings
                     if let Some(ts) = self.config.turn_servers.first() {
                         self.settings_turn_url = ts.url.clone();
                         self.settings_turn_user = ts.username.clone();
@@ -163,8 +149,6 @@ impl VoircApp {
             });
         });
     }
-
-    // ── Host Setup ──
 
     fn render_host_setup(&mut self, ctx: &Context) {
         CentralPanel::default().show(ctx, |ui| {
@@ -188,20 +172,24 @@ impl VoircApp {
                             ui.add_space(10.0);
                         }
 
-                        if ui.add_sized([400.0, 40.0], egui::Button::new(RichText::new("🚀 Start Server").size(16.0))).clicked() {
+                        if ui.add_sized([400.0, 40.0], egui::Button::new(RichText::new("Start Server").size(16.0))).clicked() {
                             self.start_hosting();
                         }
                     });
                 } else {
-                    // Only show the external link — never show the 127.0.0.1 one
                     let external_link = self.host_link_external.try_read()
                         .ok()
                         .and_then(|guard| guard.clone());
 
                     ui.vertical(|ui| {
                         ui.set_max_width(500.0);
-                        ui.label(RichText::new("✅ Server is running!").size(18.0).color(egui::Color32::GREEN));
+                        ui.label(RichText::new("Server is running!").size(18.0).color(egui::Color32::GREEN));
                         ui.add_space(20.0);
+
+                        if let Some(warn) = &self.upnp_warning {
+                            ui.colored_label(egui::Color32::YELLOW, warn);
+                            ui.add_space(10.0);
+                        }
 
                         if let Some(link) = &external_link {
                             ui.label(RichText::new("Share this link with friends:").size(14.0));
@@ -212,7 +200,7 @@ impl VoircApp {
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.monospace(link);
-                                        if ui.button("📋 Copy").clicked() {
+                                        if ui.button("Copy").clicked() {
                                             ui.output_mut(|o| o.copied_text = link.clone());
                                             self.link_copied = true;
                                         }
@@ -240,17 +228,16 @@ impl VoircApp {
                 }
 
                 ui.add_space(20.0);
-                if ui.button("← Back").clicked() {
+                if ui.button("<- Back").clicked() {
                     self.screen = Screen::Dashboard;
                     self.host_error = None;
                     self.host_link = None;
                     self.link_copied = false;
+                    self.upnp_warning = None;
                 }
             });
         });
     }
-
-    // ── Join ──
 
     fn render_join_prompt(&mut self, ctx: &Context) {
         CentralPanel::default().show(ctx, |ui| {
@@ -278,15 +265,13 @@ impl VoircApp {
                 });
 
                 ui.add_space(20.0);
-                if ui.button("← Back").clicked() {
+                if ui.button("<- Back").clicked() {
                     self.screen = Screen::Dashboard;
                     self.join_error = None;
                 }
             });
         });
     }
-
-    // ── Settings ──
 
     fn render_settings(&mut self, ctx: &Context) {
         CentralPanel::default().show(ctx, |ui| {
@@ -322,8 +307,6 @@ impl VoircApp {
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
                     self.config.display_name = self.settings_name.clone();
-
-                    // Save TURN config
                     self.config.turn_servers.clear();
                     if !self.settings_turn_url.is_empty() {
                         self.config.turn_servers.push(TurnServer {
@@ -332,7 +315,6 @@ impl VoircApp {
                             credential: self.settings_turn_cred.clone(),
                         });
                     }
-
                     let _ = self.config.save();
                     self.screen = Screen::Dashboard;
                 }
@@ -342,8 +324,6 @@ impl VoircApp {
             });
         });
     }
-
-    // ── Recent Servers ──
 
     fn render_recent_servers(&mut self, ctx: &Context) {
         CentralPanel::default().show(ctx, |ui| {
@@ -379,8 +359,6 @@ impl VoircApp {
         });
     }
 
-    // ── In Call ──
-
     fn render_in_call(&mut self, ctx: &Context) {
         let mut disconnect = false;
         let mut send_msg = false;
@@ -399,13 +377,11 @@ impl VoircApp {
                 .map(|g| g.clone())
                 .unwrap_or_default();
 
-            // Refresh speaking flags
             {
                 let s = Arc::clone(&state);
                 tokio::spawn(async move { s.refresh_speaking().await });
             }
 
-            // Handle file drag-and-drop
             let dropped: Vec<_> = ctx.input(|i| i.raw.dropped_files.clone());
             for file in dropped {
                 if let Some(path) = &file.path {
@@ -421,7 +397,6 @@ impl VoircApp {
                 }
             }
 
-            // Top bar
             let cmd_tx_top = cmd_tx.clone();
             let our_role = state.our_role.try_read().map(|r| *r).unwrap_or(Role::Peer);
             let invite_link_ref = call_state.invite_link.try_read()
@@ -433,10 +408,9 @@ impl VoircApp {
                     .inner_margin(10.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("🎤").size(20.0));
+                            ui.label(RichText::new("V").size(20.0));
                             ui.label(RichText::new(&current_channel).size(16.0).strong());
 
-                            // Show role badge
                             let badge = match our_role {
                                 Role::Host => RichText::new(" [HOST]").size(12.0).color(egui::Color32::GOLD),
                                 Role::Mod => RichText::new(" [MOD]").size(12.0).color(egui::Color32::LIGHT_BLUE),
@@ -450,9 +424,8 @@ impl VoircApp {
                                     disconnect = true;
                                 }
 
-                                // Copy invite link button
                                 if let Some(link) = &invite_link_ref {
-                                    if ui.button("📋 Invite").clicked() {
+                                    if ui.button("Invite").clicked() {
                                         ui.output_mut(|o| o.copied_text = link.clone());
                                     }
                                 }
@@ -465,7 +438,6 @@ impl VoircApp {
                     });
             });
 
-            // Bottom input bar
             let chat_id = egui::Id::new("chat_input_field");
             TopBottomPanel::bottom("call_input").show(ctx, |ui| {
                 egui::Frame::none()
@@ -473,7 +445,6 @@ impl VoircApp {
                     .inner_margin(10.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label("💬");
                             let resp = ui.add(
                                 TextEdit::singleline(&mut self.chat_input)
                                     .id(chat_id)
@@ -482,14 +453,12 @@ impl VoircApp {
                             );
                             if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.chat_input.is_empty() {
                                 send_msg = true;
-                                // Re-focus the input after sending
                                 resp.request_focus();
                             }
                         });
                     });
             });
 
-            // Left sidebar — channel list
             let cmd_tx_ch = call_state.command_tx.clone();
             let cmd_tx_new = call_state.command_tx.clone();
             egui::SidePanel::left("channel_panel")
@@ -509,7 +478,7 @@ impl VoircApp {
                                 for ch in &channels {
                                     let is_current = *ch == current_channel;
                                     let text = if is_current {
-                                        RichText::new(format!("▶ {}", ch)).size(14.0).strong().color(egui::Color32::WHITE)
+                                        RichText::new(format!("> {}", ch)).size(14.0).strong().color(egui::Color32::WHITE)
                                     } else {
                                         RichText::new(format!("  {}", ch)).size(14.0).color(egui::Color32::GRAY)
                                     };
@@ -542,7 +511,7 @@ impl VoircApp {
                         });
                 });
 
-            // Right sidebar — voice panel + files
+            // Right sidebar — voice panel with connection state
             let state_sb = Arc::clone(&state);
             egui::SidePanel::right("voice_panel")
                 .resizable(false)
@@ -557,7 +526,7 @@ impl VoircApp {
                                     .map(|p| p.values().filter(|v| v.connected).count())
                                     .unwrap_or(0);
 
-                                ui.label(RichText::new(format!("VOICE — {} online", connected)).size(12.0).color(egui::Color32::GRAY));
+                                ui.label(RichText::new(format!("VOICE - {} online", connected)).size(12.0).color(egui::Color32::GRAY));
                                 ui.add_space(10.0);
                                 ui.separator();
                                 ui.add_space(10.0);
@@ -565,36 +534,56 @@ impl VoircApp {
                                 // You
                                 ui.horizontal(|ui| {
                                     ui.add_space(10.0);
-                                    ui.label(RichText::new("🔊").size(18.0));
                                     let role_tag = match our_role {
-                                        Role::Host => " ⭐",
-                                        Role::Mod => " 🛡",
+                                        Role::Host => " *",
+                                        Role::Mod => " +",
                                         Role::Peer => "",
                                     };
                                     ui.label(RichText::new(format!("{} (you){}", nickname, role_tag)).size(14.0));
                                 });
                                 ui.add_space(5.0);
 
-                                // Peers
+                                // Peers with connection state
                                 if let Ok(peers) = state_sb.peer_states.try_read() {
                                     for peer in peers.values() {
                                         ui.horizontal(|ui| {
                                             ui.add_space(10.0);
-                                            if peer.speaking {
-                                                ui.label(RichText::new("🔊").size(18.0).color(egui::Color32::GREEN));
-                                            } else if peer.connected {
-                                                ui.label(RichText::new("🔇").size(18.0).color(egui::Color32::GRAY));
-                                            } else {
-                                                ui.label(RichText::new("⚫").size(18.0).color(egui::Color32::DARK_GRAY));
-                                            }
+
+                                            let (icon, icon_color) = match peer.conn_state {
+                                                ConnState::Connected => {
+                                                    if peer.speaking {
+                                                        (">>", egui::Color32::GREEN)
+                                                    } else {
+                                                        ("--", egui::Color32::GRAY)
+                                                    }
+                                                }
+                                                ConnState::Connecting => ("...", egui::Color32::YELLOW),
+                                                ConnState::NatIssue => ("!!", egui::Color32::from_rgb(255, 165, 0)),
+                                                ConnState::Relayed => ("~>", egui::Color32::LIGHT_BLUE),
+                                                ConnState::Failed => ("XX", egui::Color32::RED),
+                                            };
+                                            ui.label(RichText::new(icon).size(14.0).color(icon_color).monospace());
+
                                             let role_tag = match peer.role {
-                                                Role::Host => " ⭐",
-                                                Role::Mod => " 🛡",
+                                                Role::Host => " *",
+                                                Role::Mod => " +",
                                                 Role::Peer => "",
                                             };
                                             let color = if peer.connected { egui::Color32::WHITE } else { egui::Color32::GRAY };
                                             ui.label(RichText::new(format!("{}{}", peer.nickname, role_tag)).size(14.0).color(color));
                                         });
+
+                                        // Show status text for non-connected peers
+                                        if peer.conn_state != ConnState::Connected {
+                                            ui.horizontal(|ui| {
+                                                ui.add_space(35.0);
+                                                let status_color = match peer.conn_state {
+                                                    ConnState::NatIssue | ConnState::Failed => egui::Color32::from_rgb(255, 165, 0),
+                                                    _ => egui::Color32::DARK_GRAY,
+                                                };
+                                                ui.label(RichText::new(peer.conn_state.to_string()).size(10.0).color(status_color));
+                                            });
+                                        }
                                         ui.add_space(5.0);
                                     }
                                 }
@@ -605,7 +594,7 @@ impl VoircApp {
                                         ui.add_space(15.0);
                                         ui.separator();
                                         ui.add_space(10.0);
-                                        ui.label(RichText::new("📁 FILES").size(12.0).color(egui::Color32::GRAY));
+                                        ui.label(RichText::new("FILES").size(12.0).color(egui::Color32::GRAY));
                                         ui.add_space(8.0);
 
                                         ScrollArea::vertical()
@@ -617,7 +606,7 @@ impl VoircApp {
                                                         ui.add_space(5.0);
                                                         ui.vertical(|ui| {
                                                             ui.label(RichText::new(&file.name).size(12.0).strong());
-                                                            ui.label(RichText::new(format!("from {} · {} KB", file.from, file.size / 1024)).size(10.0).color(egui::Color32::GRAY));
+                                                            ui.label(RichText::new(format!("from {} - {} KB", file.from, file.size / 1024)).size(10.0).color(egui::Color32::GRAY));
                                                         });
                                                         if ui.small_button("Open").clicked() {
                                                             open_path(&file.path);
@@ -639,7 +628,7 @@ impl VoircApp {
                     .show(ui, |ui| {
                         ui.vertical(|ui| {
                             ui.add_space(10.0);
-                            ui.label(RichText::new(format!("TEXT CHAT — {}", current_channel)).size(12.0).color(egui::Color32::GRAY));
+                            ui.label(RichText::new(format!("TEXT CHAT - {}", current_channel)).size(12.0).color(egui::Color32::GRAY));
                             ui.add_space(5.0);
                             ui.separator();
                             ui.add_space(10.0);
@@ -705,28 +694,100 @@ impl VoircApp {
             return;
         }
 
+        // Generate TLS cert
+        let cert_dir = UserConfig::tls_cert_dir();
+        let cert_info = match tls::load_or_generate(&cert_dir) {
+            Ok(ci) => ci,
+            Err(e) => {
+                warn!("TLS cert generation failed, falling back to plaintext: {}", e);
+                // Fall back to plaintext
+                tokio::spawn(async move {
+                    if let Err(e) = EmbeddedServer::run(port).await {
+                        error!("Server error: {}", e);
+                    }
+                });
+
+                let conn_info = ConnectionInfo::new("127.0.0.1".to_string(), port, channels.clone());
+                self.host_link = conn_info.to_magic_link().ok();
+                self.link_copied = false;
+
+                let external = Arc::clone(&self.host_link_external);
+                let ch = channels;
+                tokio::spawn(async move {
+                    if let Ok(ip) = PortForwarder::get_external_ip(None).await {
+                        let info = ConnectionInfo::new(ip, port, ch);
+                        if let Ok(link) = info.to_magic_link() {
+                            *external.write().await = Some(link);
+                        }
+                    }
+                });
+
+                self.host_error = None;
+                return;
+            }
+        };
+
+        let fingerprint = cert_info.fingerprint.clone();
+        let relay_port = port + 1;
+
+        // Start TLS IRC server
+        let cert_for_server = crate::tls::CertInfo {
+            cert_der: cert_info.cert_der.clone(),
+            key_der: cert_info.key_der.clone(),
+            fingerprint: cert_info.fingerprint.clone(),
+        };
         tokio::spawn(async move {
-            if let Err(e) = EmbeddedServer::run(port).await {
+            if let Err(e) = EmbeddedServer::run_tls(port, &cert_for_server).await {
                 error!("Server error: {}", e);
             }
         });
 
-        let port_c = port;
+        // Start relay
         tokio::spawn(async move {
-            if let Err(e) = PortForwarder::forward_port(port_c).await {
-                info!("UPnP failed (not critical): {}", e);
+            if let Err(e) = AudioRelay::run(relay_port).await {
+                error!("Relay error: {}", e);
             }
         });
 
-        let conn_info = ConnectionInfo::new("127.0.0.1".to_string(), port, channels.clone());
+        // UPnP with warning feedback
+        let upnp_warning: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+        let uw = Arc::clone(&upnp_warning);
+        let port_c = port;
+        tokio::spawn(async move {
+            if let Err(e) = PortForwarder::forward_port(port_c, None).await {
+                info!("UPnP failed (not critical): {}", e);
+                *uw.write().await = Some(
+                    "Could not auto-forward port. Friends outside your network may not connect.".to_string()
+                );
+            }
+        });
+        // Check the warning after a brief delay
+        let uw2 = Arc::clone(&upnp_warning);
+        let upnp_warning_out = Arc::new(std::sync::Mutex::new(None::<String>));
+        let uwo = Arc::clone(&upnp_warning_out);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            if let Some(w) = uw2.read().await.clone() {
+                if let Ok(mut guard) = uwo.lock() {
+                    *guard = Some(w);
+                }
+            }
+        });
+
+        let conn_info = ConnectionInfo::new("127.0.0.1".to_string(), port, channels.clone())
+            .with_tls(fingerprint.clone())
+            .with_relay(relay_port);
         self.host_link = conn_info.to_magic_link().ok();
         self.link_copied = false;
 
         let external = Arc::clone(&self.host_link_external);
         let ch = channels;
+        let fp = fingerprint;
         tokio::spawn(async move {
-            if let Ok(ip) = PortForwarder::get_external_ip().await {
-                let info = ConnectionInfo::new(ip, port, ch);
+            if let Ok(ip) = PortForwarder::get_external_ip(None).await {
+                let info = ConnectionInfo::new(ip, port, ch)
+                    .with_tls(fp)
+                    .with_relay(relay_port);
                 if let Ok(link) = info.to_magic_link() {
                     info!("External magic link: {}", link);
                     *external.write().await = Some(link);
@@ -744,15 +805,39 @@ impl VoircApp {
         }
     }
 
-    fn connect_to_server(&mut self, conn_info: ConnectionInfo, is_host: bool) {
+fn connect_to_server(&mut self, conn_info: ConnectionInfo, is_host: bool) {
         let state = AppState::new();
         let nickname = self.config.display_name.clone();
         let channels_vec = conn_info.channels.clone();
         let default_channel = conn_info.default_channel().to_string();
         let turn_servers = self.config.turn_servers.clone();
         let banned_users = self.config.banned_users.clone();
+        
+        // --- CHANGE: Capture the fingerprint explicitly ---
+        let cert_fingerprint = conn_info.cert_fingerprint.clone();
+        let use_tls = cert_fingerprint.is_some();
+        // --------------------------------------------------
 
-        // Save recent
+        let relay_port = conn_info.relay_port;
+        let relay_addr = if let Some(rp) = relay_port {
+            Some(format!("{}:{}", conn_info.host, rp))
+        } else {
+            None
+        };
+
+        // Update diagnostics
+        {
+            let s = Arc::clone(&state);
+            let turn_count = turn_servers.len();
+            let has_relay = relay_port.is_some();
+            tokio::spawn(async move {
+                let mut d = s.diagnostics.write().await;
+                d.turn_configured = turn_count;
+                d.relay_enabled = has_relay;
+                d.relay_port = relay_port;
+            });
+        }
+
         let mut config = self.config.clone();
         let name = if is_host {
             format!("My Server ({})", channels_vec.join(", "))
@@ -764,7 +849,6 @@ impl VoircApp {
             self.config = config;
         }
 
-        // Audio
         let mixer = match VoiceMixer::new() {
             Ok(m) => Arc::new(m),
             Err(e) => { error!("Mixer: {}", e); return; }
@@ -773,7 +857,6 @@ impl VoircApp {
         let (mic_tx, mic_rx) = mpsc::unbounded_channel();
         let (mix_tx, mut mix_rx) = mpsc::unbounded_channel::<(String, Vec<u8>)>();
 
-        // Input stream is optional — None means no mic (listen-only)
         let input_stream = match mixer.start_input(mic_tx) {
             Ok(s) => s,
             Err(e) => { error!("Input stream: {}", e); None }
@@ -788,8 +871,6 @@ impl VoircApp {
         }
         let has_mic = input_stream.is_some();
 
-        // Mixer task — decode incoming audio and play it locally.
-        // For superpeers, also forward raw Opus packets to other peers.
         let mixer_c = Arc::clone(&mixer);
         let state_mix = Arc::clone(&state);
         let state_fwd = Arc::clone(&state);
@@ -797,12 +878,10 @@ impl VoircApp {
         tokio::spawn(async move {
             let mut decoders = PeerDecoders::new();
             while let Some((nick, packet)) = mix_rx.recv().await {
-                // Decode for local playback
                 if let Some(pcm) = decoders.decode(&nick, &packet) {
-                    mixer_c.queue_audio(pcm).await;
+                    mixer_c.queue_audio(pcm);
                     state_mix.mark_speaking(&nick).await;
                 }
-                // If we're a superpeer, forward the raw packet to others
                 let our_role = state_fwd.our_role().await;
                 if our_role.is_superpeer() {
                     let _ = forward_tx.send((nick, packet));
@@ -810,10 +889,7 @@ impl VoircApp {
             }
         });
 
-        // Command channel
         let (command_tx, command_rx) = mpsc::unbounded_channel::<CallCommand>();
-
-        // File receive channel
         let (file_tx, file_rx) = mpsc::unbounded_channel::<ReceivedFile>();
 
         let current_channel = Arc::new(RwLock::new(default_channel.clone()));
@@ -825,17 +901,14 @@ impl VoircApp {
         let cur_ch = Arc::clone(&current_channel);
         let channels_for_loop = Arc::clone(&channels);
 
-        // Set initial role
         let our_role = if is_host { Role::Host } else { Role::Peer };
         let state_role = Arc::clone(&state);
         tokio::spawn(async move {
             state_role.set_our_role(our_role).await;
         });
 
-        // Invite link for sharing — shared between UI and event loop
         let invite_link_c = Arc::clone(&self.host_link_external);
 
-        // Main call task
         tokio::spawn(async move {
             let timeout = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
@@ -844,6 +917,9 @@ impl VoircApp {
                     nick_c.clone(),
                     default_channel.clone(),
                     state_c.clone(),
+                    // --- CHANGE: Pass the fingerprint instead of bool ---
+                    cert_fingerprint,
+                    // ----------------------------------------------------
                 ),
             );
 
@@ -862,22 +938,23 @@ impl VoircApp {
                         }
                     });
 
-                    // Announce our role
                     let _ = irc.announce_role(&default_channel, our_role);
 
                     let ch = cur_ch.read().await.clone();
-                    state_c.add_message(&ch, format!("Connected as {}", nick_c)).await;
+                    let tls_note = if use_tls { " (TLS)" } else { "" };
+                    state_c.add_message(&ch, format!("Connected as {}{}", nick_c, tls_note)).await;
                     if is_host {
-                        state_c.add_message(&ch, "🏠 You are hosting this room".to_string()).await;
+                        state_c.add_message(&ch, "You are hosting this room".to_string()).await;
+                        if relay_addr.is_some() {
+                            state_c.add_message(&ch, "Audio relay is active for NAT-challenged peers".to_string()).await;
+                        }
                     }
                     if !has_mic {
-                        state_c.add_message(&ch, "🔇 No microphone detected — listen-only mode. Chat still works!".to_string()).await;
+                        state_c.add_message(&ch, "No microphone detected - listen-only mode. Chat still works!".to_string()).await;
                     }
 
-                    // Load chat history from disk
                     state_c.load_history(&ch, 100).await;
 
-                    // Load custom commands from config directory
                     let custom_commands = moderation::CustomCommands::load();
 
                     Self::event_loop(
@@ -887,6 +964,7 @@ impl VoircApp {
                         cur_ch, channels_for_loop,
                         turn_servers, banned_users,
                         custom_commands, invite_link_c,
+                        relay_addr,
                     ).await;
                 }
                 Ok(Err(e)) => {
@@ -900,14 +978,11 @@ impl VoircApp {
             }
         });
 
-        // Build invite link for sharing from within the call
         let invite_link = Arc::clone(&self.host_link_external);
-        // For joiners, generate the link from connection info
         if !is_host {
             if let Ok(link) = conn_info.to_magic_link() {
                 let il = Arc::clone(&invite_link);
                 tokio::spawn(async move {
-                    // Only set if host hasn't set an external one
                     let mut guard = il.write().await;
                     if guard.is_none() {
                         *guard = Some(link);
@@ -931,8 +1006,6 @@ impl VoircApp {
         self.file_status = None;
     }
 
-    // ── Event Loop ──
-
     #[allow(clippy::too_many_arguments)]
     async fn event_loop(
         irc: Arc<IrcClient>,
@@ -952,18 +1025,38 @@ impl VoircApp {
         banned_users: std::collections::HashSet<String>,
         mut custom_commands: moderation::CustomCommands,
         invite_link: Arc<RwLock<Option<String>>>,
+        relay_addr: Option<String>,
     ) {
         let (ice_out_tx, mut ice_out_rx) = mpsc::unbounded_channel::<InternalSignal>();
         let peers: Arc<RwLock<HashMap<String, Arc<WebRtcPeer>>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
-        // Track reconnect attempts for exponential backoff
         let reconnect_attempts: Arc<RwLock<HashMap<String, u32>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
-        // Forward WebRTC signals → IRC, handle reconnects with backoff
+        // Optional relay connection for fallback
+        let relay_conn: Arc<RwLock<Option<RelayConnection>>> = Arc::new(RwLock::new(None));
+        if let Some(ref addr) = relay_addr {
+            let mix_tx_relay = mix_tx.clone();
+            let addr_c = addr.clone();
+            let nick_c = nickname.clone();
+            let rc = Arc::clone(&relay_conn);
+            tokio::spawn(async move {
+                match RelayConnection::connect(&addr_c, &nick_c, mix_tx_relay).await {
+                    Ok(conn) => {
+                        info!("Relay connection established");
+                        *rc.write().await = Some(conn);
+                    }
+                    Err(e) => {
+                        warn!("Could not connect to relay: {}", e);
+                    }
+                }
+            });
+        }
+
         let irc_c = Arc::clone(&irc);
         let (reconnect_tx, mut reconnect_rx) = mpsc::unbounded_channel::<String>();
+        let (conn_failed_tx, mut conn_failed_rx) = mpsc::unbounded_channel::<String>();
         tokio::spawn(async move {
             while let Some(sig) = ice_out_rx.recv().await {
                 match sig {
@@ -975,22 +1068,28 @@ impl VoircApp {
                     InternalSignal::Reconnect(nick) => {
                         let _ = reconnect_tx.send(nick);
                     }
+                    InternalSignal::ConnFailed(nick) => {
+                        let _ = conn_failed_tx.send(nick);
+                    }
                 }
             }
         });
 
-        // Fan-out mic → connected peers
         let peers_mic = Arc::clone(&peers);
+        let relay_mic = Arc::clone(&relay_conn);
         tokio::spawn(async move {
             while let Some(pkt) = mic_rx.recv().await {
                 let r = peers_mic.read().await;
                 for p in r.values() {
                     let _ = p.send_audio(&pkt).await;
                 }
+                // Also send via relay if connected
+                if let Some(rc) = relay_mic.read().await.as_ref() {
+                    let _ = rc.send_audio(&pkt).await;
+                }
             }
         });
 
-        // Superpeer audio forwarding: relay received audio to all other connected peers
         let peers_fwd = Arc::clone(&peers);
         tokio::spawn(async move {
             while let Some((sender_nick, raw_packet)) = forward_rx.recv().await {
@@ -1003,7 +1102,6 @@ impl VoircApp {
             }
         });
 
-        // Helper closure: create a peer with topology check
         async fn maybe_create_peer(
             nick: &str,
             nickname: &str,
@@ -1024,10 +1122,11 @@ impl VoircApp {
                 return;
             }
 
-            // Only the lexicographically-lesser peer initiates
             if nickname >= nick {
                 return;
             }
+
+            state.set_peer_connecting(nick).await;
 
             match WebRtcPeer::new(
                 nick.to_string(), Arc::clone(state), mix_tx.clone(),
@@ -1047,13 +1146,11 @@ impl VoircApp {
 
         loop {
             tokio::select! {
-                // Commands from GUI
                 Some(cmd) = command_rx.recv() => {
                     match cmd {
                         CallCommand::SendMessage(text) => {
                             let ch = current_channel.read().await.clone();
 
-                            // Build command context for template expansion
                             let peer_nicks: Vec<String> = state.peer_states.read().await
                                 .values()
                                 .filter(|ps| ps.connected)
@@ -1081,31 +1178,55 @@ impl VoircApp {
                                         if peers_list.is_empty() {
                                             state.add_message(&ch, "No peers connected".to_string()).await;
                                         } else {
-                                            state.add_message(&ch, "── Connected Peers ──".to_string()).await;
+                                            state.add_message(&ch, "-- Connected Peers --".to_string()).await;
                                             for ps in peers_list.values() {
-                                                let status = if ps.connected { "online" } else { "offline" };
                                                 state.add_message(&ch, format!(
-                                                    "  {} [{}] ({})", ps.nickname, ps.role.as_str(), status
+                                                    "  {} [{}] ({})", ps.nickname, ps.role.as_str(), ps.conn_state
                                                 )).await;
                                             }
                                         }
                                     }
                                     moderation::Command::ListBanned => {
                                         if !our_role.can_moderate() {
-                                            state.add_message(&ch, "⚠ Only host and mods can view ban list".to_string()).await;
+                                            state.add_message(&ch, "Only host and mods can view ban list".to_string()).await;
                                         } else if banned_users.is_empty() {
                                             state.add_message(&ch, "No banned users".to_string()).await;
                                         } else {
-                                            state.add_message(&ch, "── Banned Users ──".to_string()).await;
+                                            state.add_message(&ch, "-- Banned Users --".to_string()).await;
                                             for nick in &banned_users {
                                                 state.add_message(&ch, format!("  {}", nick)).await;
+                                            }
+                                        }
+                                    }
+                                    moderation::Command::Diag => {
+                                        let d = state.diagnostics.read().await;
+                                        state.add_message(&ch, "-- Connection Diagnostics --".to_string()).await;
+                                        state.add_message(&ch, format!("  Local IP: {}", d.local_ip.as_deref().unwrap_or("unknown"))).await;
+                                        state.add_message(&ch, format!("  External IP: {}", d.external_ip.as_deref().unwrap_or("unknown"))).await;
+                                        state.add_message(&ch, format!("  UPnP: {}", d.upnp_status.as_deref().unwrap_or("not checked"))).await;
+                                        state.add_message(&ch, format!("  TURN servers: {}", d.turn_configured)).await;
+                                        state.add_message(&ch, format!("  Relay: {}", if d.relay_enabled { "enabled" } else { "disabled" })).await;
+                                        if let Some(rp) = d.relay_port {
+                                            state.add_message(&ch, format!("  Relay port: {}", rp)).await;
+                                        }
+                                        state.add_message(&ch, format!("  Port open: {}", match d.port_open {
+                                            Some(true) => "yes",
+                                            Some(false) => "no",
+                                            None => "unknown",
+                                        })).await;
+
+                                        // Show peer connection states
+                                        let peers_list = state.peer_states.read().await;
+                                        if !peers_list.is_empty() {
+                                            state.add_message(&ch, "  Peer connections:".to_string()).await;
+                                            for ps in peers_list.values() {
+                                                state.add_message(&ch, format!("    {} - {}", ps.nickname, ps.conn_state)).await;
                                             }
                                         }
                                     }
                                     moderation::Command::EditCommands => {
                                         let path = moderation::CustomCommands::commands_path();
                                         state.add_message(&ch, format!("Commands file: {}", path.display())).await;
-                                        // Try to open in the user's default editor
                                         let opened = std::process::Command::new("xdg-open")
                                             .arg(&path)
                                             .spawn()
@@ -1116,21 +1237,21 @@ impl VoircApp {
                                                 state.add_message(&ch, "Opened in editor. Use /reload when done.".to_string()).await;
                                             }
                                             Err(_) => {
-                                                state.add_message(&ch, "Could not open editor — edit the file manually, then /reload".to_string()).await;
+                                                state.add_message(&ch, "Could not open editor - edit the file manually, then /reload".to_string()).await;
                                             }
                                         }
                                     }
                                     moderation::Command::Invite => {
                                         let link = invite_link.read().await;
                                         if let Some(l) = link.as_ref() {
-                                            state.add_message(&ch, format!("📋 Invite link: {}", l)).await;
+                                            state.add_message(&ch, format!("Invite link: {}", l)).await;
                                         } else {
-                                            state.add_message(&ch, "⚠ No invite link available yet (external IP still resolving)".to_string()).await;
+                                            state.add_message(&ch, "No invite link available yet (external IP still resolving)".to_string()).await;
                                         }
                                     }
                                     moderation::Command::Reload => {
                                         custom_commands = moderation::CustomCommands::load();
-                                        state.add_message(&ch, "✅ Custom commands reloaded".to_string()).await;
+                                        state.add_message(&ch, "Custom commands reloaded".to_string()).await;
                                     }
                                     moderation::Command::Mod(action) => {
                                         match moderation::check_permission(our_role, &action) {
@@ -1150,7 +1271,7 @@ impl VoircApp {
                                                     moderation::ModAction::Promote(target) => {
                                                         let _ = irc.send_mod_action(&ch, "promote", target);
                                                         state.set_peer_role(target, Role::Mod).await;
-                                                        state.add_message(&ch, format!("🛡 {} is now a mod (superpeer relay)", target)).await;
+                                                        state.add_message(&ch, format!("{} is now a mod (superpeer relay)", target)).await;
                                                     }
                                                     moderation::ModAction::Demote(target) => {
                                                         let _ = irc.send_mod_action(&ch, "demote", target);
@@ -1160,29 +1281,26 @@ impl VoircApp {
                                                 }
                                             }
                                             Err(msg) => {
-                                                state.add_message(&ch, format!("⚠ {}", msg)).await;
+                                                state.add_message(&ch, format!("Permission denied: {}", msg)).await;
                                             }
                                         }
                                     }
                                     moderation::Command::Custom { response, broadcast } => {
                                         if broadcast {
-                                            // Send as visible chat message
                                             if let Err(e) = irc.send_message(&ch, &response) {
                                                 error!("Send: {}", e);
                                             } else {
                                                 state.add_message(&ch, format!("<{}> {}", nickname, response)).await;
                                             }
                                         } else {
-                                            // Local only
                                             state.add_message(&ch, response).await;
                                         }
                                     }
                                     moderation::Command::Unknown(cmd) => {
-                                        state.add_message(&ch, format!("⚠ Unknown command: {}. Type /help for commands.", cmd)).await;
+                                        state.add_message(&ch, format!("Unknown command: {}. Type /help for commands.", cmd)).await;
                                     }
                                 }
                             } else {
-                                // Normal chat message
                                 if let Err(e) = irc.send_message(&ch, &text) {
                                     error!("Send: {}", e);
                                 } else {
@@ -1192,7 +1310,7 @@ impl VoircApp {
                         }
                         CallCommand::SwitchChannel(new_ch) => {
                             let old_ch = current_channel.read().await.clone();
-                            info!("Switching {} → {}", old_ch, new_ch);
+                            info!("Switching {} -> {}", old_ch, new_ch);
 
                             let mut pw = peers.write().await;
                             for (_, p) in pw.drain() {
@@ -1205,10 +1323,7 @@ impl VoircApp {
                             let _ = irc.join_channel(&new_ch);
                             *current_channel.write().await = new_ch.clone();
 
-                            // Load history for new channel
                             state.load_history(&new_ch, 100).await;
-
-                            // Re-announce role in new channel
                             let _ = irc.announce_role(&new_ch, our_role);
 
                             state.add_message(&new_ch, format!("Joined {}", new_ch)).await;
@@ -1248,7 +1363,7 @@ impl VoircApp {
                             }
                             let kb = size / 1024;
                             state.add_message(&ch, format!(
-                                "📎 You shared {} ({} KB) → {} peers", name, kb, ok
+                                "You shared {} ({} KB) -> {} peers", name, kb, ok
                             )).await;
                         }
                         CallCommand::Shutdown => {
@@ -1258,7 +1373,6 @@ impl VoircApp {
                     }
                 }
 
-                // Received files from peers
                 Some(file) = file_rx.recv() => {
                     let ch = current_channel.read().await.clone();
                     let size = file.data.len();
@@ -1272,27 +1386,40 @@ impl VoircApp {
                                 file.from.clone(), file.name.clone(), size, save_path.clone(),
                             ).await;
                             state.add_message(&ch, format!(
-                                "📎 {} shared {} ({} KB)",
+                                "{} shared {} ({} KB)",
                                 file.from, file.name, kb,
                             )).await;
                         }
                         Err(e) => {
                             state.add_message(&ch, format!(
-                                "📎 {} shared {} ({} KB) — save failed: {}",
+                                "{} shared {} ({} KB) - save failed: {}",
                                 file.from, file.name, kb, e
                             )).await;
                         }
                     }
                 }
 
-                // Reconnects with exponential backoff
+                // Connection failure - suggest relay
+                Some(nick) = conn_failed_rx.recv() => {
+                    let ch = current_channel.read().await.clone();
+                    if relay_addr.is_some() {
+                        state.add_message(&ch, format!(
+                            "WebRTC to {} failed - audio will route through relay", nick
+                        )).await;
+                        state.set_peer_conn_state(&nick, ConnState::Relayed).await;
+                    } else {
+                        state.add_message(&ch, format!(
+                            "Connection to {} failed. Ask the host to enable relay mode.", nick
+                        )).await;
+                    }
+                }
+
                 Some(nick) = reconnect_rx.recv() => {
                     info!("Reconnect: {}", nick);
                     peers.write().await.remove(&nick);
 
                     if !state.peer_states.read().await.contains_key(&nick) { continue; }
 
-                    // Exponential backoff: 2s, 4s, 8s, 16s, max 30s
                     let mut attempts = reconnect_attempts.write().await;
                     let attempt = attempts.entry(nick.clone()).or_insert(0);
                     *attempt += 1;
@@ -1307,6 +1434,8 @@ impl VoircApp {
                         if !topology::should_connect_to(&state, &nickname, our_role, &nick, target_role).await {
                             continue;
                         }
+
+                        state.set_peer_connecting(&nick).await;
 
                         match WebRtcPeer::new(
                             nick.clone(), Arc::clone(&state), mix_tx.clone(),
@@ -1325,24 +1454,21 @@ impl VoircApp {
                     }
                 }
 
-                // IRC events
                 Some(event) = irc_events.recv() => {
                     match event {
                         IrcEvent::UserJoined { nick, role } => {
                             info!("Joined: {} (role: {:?})", nick, role);
 
-                            // Check ban list
                             if banned_users.contains(&nick) {
                                 warn!("Banned user {} tried to join, ignoring", nick);
                                 let ch = current_channel.read().await.clone();
-                                state.add_message(&ch, format!("⚠ Banned user {} tried to join", nick)).await;
+                                state.add_message(&ch, format!("Banned user {} tried to join", nick)).await;
                                 continue;
                             }
 
                             state.update_peer_state(nick.clone(), false, false).await;
                             state.set_peer_role(&nick, role).await;
 
-                            // Reset reconnect counter on fresh join
                             reconnect_attempts.write().await.remove(&nick);
 
                             maybe_create_peer(
@@ -1363,12 +1489,13 @@ impl VoircApp {
                         IrcEvent::WebRtcSignal { from, payload } => {
                             match serde_json::from_str::<WebRtcSignal>(&payload) {
                                 Ok(WebRtcSignal::Offer { sdp }) => {
-                                    // Check topology before accepting
                                     let from_role = state.get_peer_role(&from).await;
                                     if !topology::should_connect_to(&state, &nickname, our_role, &from, from_role).await {
                                         info!("Topology: rejecting offer from {}", from);
                                         continue;
                                     }
+
+                                    state.set_peer_connecting(&from).await;
 
                                     match WebRtcPeer::new(
                                         from.clone(), Arc::clone(&state), mix_tx.clone(),
@@ -1378,8 +1505,6 @@ impl VoircApp {
                                             if let Ok(answer) = peer.handle_offer(sdp).await {
                                                 peers.write().await.insert(from.clone(), Arc::new(peer));
                                                 let _ = irc.send_webrtc_signal(&from, &answer);
-
-                                                // Reset backoff on successful connection
                                                 reconnect_attempts.write().await.remove(&from);
                                             }
                                         }
@@ -1389,7 +1514,6 @@ impl VoircApp {
                                 Ok(WebRtcSignal::Answer { sdp }) => {
                                     if let Some(p) = peers.read().await.get(&from) {
                                         let _ = p.handle_answer(sdp).await;
-                                        // Reset backoff on successful connection
                                         reconnect_attempts.write().await.remove(&from);
                                     }
                                 }
@@ -1417,15 +1541,14 @@ impl VoircApp {
                             match action.as_str() {
                                 "kick" => {
                                     if target == nickname {
-                                        state.add_message(&ch, format!("⚠ You were kicked by {}", from)).await;
-                                        // TODO: actually disconnect
+                                        state.add_message(&ch, format!("You were kicked by {}", from)).await;
                                     } else {
                                         state.add_message(&ch, format!("{} was kicked by {}", target, from)).await;
                                     }
                                 }
                                 "ban" => {
                                     if target == nickname {
-                                        state.add_message(&ch, format!("⚠ You were banned by {}", from)).await;
+                                        state.add_message(&ch, format!("You were banned by {}", from)).await;
                                     } else {
                                         state.add_message(&ch, format!("{} was banned by {}", target, from)).await;
                                     }
@@ -1434,9 +1557,9 @@ impl VoircApp {
                                     state.set_peer_role(&target, Role::Mod).await;
                                     if target == nickname {
                                         state.set_our_role(Role::Mod).await;
-                                        state.add_message(&ch, format!("🛡 You were promoted to mod by {}", from)).await;
+                                        state.add_message(&ch, format!("You were promoted to mod by {}", from)).await;
                                     } else {
-                                        state.add_message(&ch, format!("🛡 {} was promoted to mod by {}", target, from)).await;
+                                        state.add_message(&ch, format!("{} was promoted to mod by {}", target, from)).await;
                                     }
                                 }
                                 "demote" => {

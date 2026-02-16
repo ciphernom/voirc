@@ -1,5 +1,3 @@
-// src/webrtc_peer.rs
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -23,10 +21,8 @@ use webrtc::rtp_transceiver::rtp_codec::{
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
 
-use crate::config::TurnServer;
+use crate::config::{ConnState, TurnServer};
 use crate::state::AppState;
-
-// ── Signaling types ──
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
@@ -39,9 +35,8 @@ pub enum WebRtcSignal {
 pub enum InternalSignal {
     WebRtc(String, WebRtcSignal),
     Reconnect(String),
+    ConnFailed(String),
 }
-
-// ── File transfer types ──
 
 pub struct ReceivedFile {
     pub from: String,
@@ -53,8 +48,6 @@ struct InFlightFile {
     name: String,
     data: Vec<u8>,
 }
-
-// ── Peer ──
 
 pub struct WebRtcPeer {
     pub nickname: String,
@@ -83,7 +76,6 @@ fn setup_dc_receive(
             if msg.is_string {
                 let text = String::from_utf8_lossy(&msg.data);
                 if let Some(rest) = text.strip_prefix("FILE:") {
-                    // FILE:name:size - header announcing a file transfer
                     if let Some((name, size_str)) = rest.rsplit_once(':') {
                         let size = size_str.parse::<usize>().unwrap_or(0);
                         *in_flight.lock().await = Some(InFlightFile {
@@ -101,7 +93,6 @@ fn setup_dc_receive(
                     }
                 }
             } else {
-                // Binary message = file chunk data (no more base64 overhead)
                 let mut guard = in_flight.lock().await;
                 if let Some(ref mut file) = *guard {
                     file.data.extend_from_slice(&msg.data);
@@ -111,7 +102,6 @@ fn setup_dc_receive(
     }));
 }
 
-/// Build ICE server list from STUN defaults + any configured TURN servers.
 fn build_ice_servers(turn_servers: &[TurnServer]) -> Vec<RTCIceServer> {
     let mut servers = vec![
         RTCIceServer {
@@ -123,9 +113,6 @@ fn build_ice_servers(turn_servers: &[TurnServer]) -> Vec<RTCIceServer> {
         },
     ];
 
-    // TURN servers are critical for users behind symmetric NATs
-    // (corporate WiFi, universities, some mobile carriers).
-    // Without these, those users simply cannot connect.
     for ts in turn_servers {
         servers.push(RTCIceServer {
             urls: vec![ts.url.clone()],
@@ -179,6 +166,9 @@ impl WebRtcPeer {
 
         let pc = Arc::new(api.new_peer_connection(config).await?);
 
+        // Track connection start time for timeout detection
+        state.set_peer_connecting(&nickname).await;
+
         // ICE candidates
         let ice_tx_c = ice_tx.clone();
         let nick_c = nickname.clone();
@@ -222,7 +212,7 @@ impl WebRtcPeer {
             })
         }));
 
-        // Connection state with exponential backoff reconnect
+        // Connection state
         let nick_c = nickname.clone();
         let state_c = Arc::clone(&state);
         let ice_tx_c = ice_tx.clone();
@@ -234,9 +224,16 @@ impl WebRtcPeer {
                 info!("Peer {} state: {:?}", nick, s);
                 match s {
                     RTCPeerConnectionState::Connected => {
-                        state.update_peer_state(nick, true, false).await;
+                        state.update_peer_state(nick.clone(), true, false).await;
+                        state.set_peer_conn_state(&nick, ConnState::Connected).await;
                     }
-                    RTCPeerConnectionState::Failed | RTCPeerConnectionState::Disconnected => {
+                    RTCPeerConnectionState::Failed => {
+                        state.update_peer_state(nick.clone(), false, false).await;
+                        state.set_peer_conn_state(&nick, ConnState::Failed).await;
+                        let _ = tx.send(InternalSignal::ConnFailed(nick.clone()));
+                        let _ = tx.send(InternalSignal::Reconnect(nick));
+                    }
+                    RTCPeerConnectionState::Disconnected => {
                         state.update_peer_state(nick.clone(), false, false).await;
                         let _ = tx.send(InternalSignal::Reconnect(nick));
                     }
@@ -324,17 +321,12 @@ impl WebRtcPeer {
         Ok(())
     }
 
-    /// Send a file over the data channel using binary frames (no base64 overhead).
     pub async fn send_file(&self, name: &str, data: &[u8]) -> Result<()> {
         let dc = self.data_channel.read().await;
         let dc = dc.as_ref().ok_or_else(|| anyhow::anyhow!("Data channel not ready"))?;
 
-        // Text header with name and size
         dc.send_text(format!("FILE:{}:{}", name, data.len())).await?;
 
-        // Binary chunks — 16KB each, no base64 encoding.
-        // Data channels support raw binary natively. The old base64 approach
-        // added 33% overhead for zero benefit.
         for chunk in data.chunks(16384) {
             dc.send(&bytes::Bytes::copy_from_slice(chunk)).await?;
         }

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use webrtc::peer_connection::RTCPeerConnection;
 
-use crate::config::Role;
+use crate::config::{ConnState, NetDiagnostics, Role};
 
 #[derive(Clone, Debug)]
 pub struct PeerState {
@@ -14,6 +14,8 @@ pub struct PeerState {
     pub connected: bool,
     pub speaking: bool,
     pub role: Role,
+    pub conn_state: ConnState,
+    pub conn_started: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -30,9 +32,8 @@ pub struct AppState {
     pub messages: RwLock<HashMap<String, Vec<String>>>,
     pub last_audio: RwLock<HashMap<String, Instant>>,
     pub received_files: RwLock<Vec<SharedFile>>,
-    /// Our own role in the current room
     pub our_role: RwLock<Role>,
-    /// Log directory for persistent chat
+    pub diagnostics: RwLock<NetDiagnostics>,
     log_dir: PathBuf,
 }
 
@@ -51,6 +52,7 @@ impl AppState {
             last_audio: RwLock::new(HashMap::new()),
             received_files: RwLock::new(Vec::new()),
             our_role: RwLock::new(Role::Peer),
+            diagnostics: RwLock::new(NetDiagnostics::default()),
             log_dir,
         })
     }
@@ -64,9 +66,7 @@ impl AppState {
     }
 
     pub async fn add_message(&self, channel: &str, msg: String) {
-        // Persist to disk (append-only, one file per channel)
         self.persist_message(channel, &msg);
-
         let mut messages = self.messages.write().await;
         let list = messages.entry(channel.to_string()).or_default();
         list.push(msg);
@@ -84,7 +84,6 @@ impl AppState {
         }
     }
 
-    /// Load recent chat history from disk for a channel
     pub async fn load_history(&self, channel: &str, max_lines: usize) {
         let safe_name = channel.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
         let path = self.log_dir.join(format!("{}.log", safe_name));
@@ -97,7 +96,6 @@ impl AppState {
 
             if list.is_empty() {
                 for line in &lines[start..] {
-                    // Strip the [timestamp] prefix for display, keep the message
                     if let Some(end_bracket) = line.find("] ") {
                         list.push(line[end_bracket + 2..].to_string());
                     } else {
@@ -110,16 +108,55 @@ impl AppState {
 
     pub async fn update_peer_state(&self, nick: String, connected: bool, speaking: bool) {
         let mut states = self.peer_states.write().await;
-        let existing_role = states.get(&nick).map(|s| s.role).unwrap_or(Role::Peer);
-        states.insert(
-            nick.clone(),
-            PeerState {
-                nickname: nick,
-                connected,
-                speaking,
-                role: existing_role,
-            },
-        );
+        
+        // Extract values first to end the immutable borrow of `states`
+        let (existing_role, existing_conn_state, existing_started) = if let Some(s) = states.get(&nick) {
+            (s.role, s.conn_state, s.conn_started)
+        } else {
+            (Role::Peer, ConnState::Connecting, None)
+        };
+
+        let conn_state = if connected {
+            ConnState::Connected
+        } else {
+            existing_conn_state
+        };
+
+        states.insert(nick.clone(), PeerState {
+            nickname: nick,
+            connected,
+            speaking,
+            role: existing_role,
+            conn_state,
+            conn_started: existing_started,
+        });
+    }
+
+    pub async fn set_peer_connecting(&self, nick: &str) {
+        let mut states = self.peer_states.write().await;
+        if let Some(ps) = states.get_mut(nick) {
+            ps.conn_state = ConnState::Connecting;
+            ps.conn_started = Some(Instant::now());
+        } else {
+            states.insert(nick.to_string(), PeerState {
+                nickname: nick.to_string(),
+                connected: false,
+                speaking: false,
+                role: Role::Peer,
+                conn_state: ConnState::Connecting,
+                conn_started: Some(Instant::now()),
+            });
+        }
+    }
+
+    pub async fn set_peer_conn_state(&self, nick: &str, state: ConnState) {
+        let mut states = self.peer_states.write().await;
+        if let Some(ps) = states.get_mut(nick) {
+            ps.conn_state = state;
+            if state == ConnState::Connected {
+                ps.connected = true;
+            }
+        }
     }
 
     pub async fn set_peer_role(&self, nick: &str, role: Role) {
@@ -132,6 +169,8 @@ impl AppState {
                 connected: false,
                 speaking: false,
                 role,
+                conn_state: ConnState::Connecting,
+                conn_started: None,
             });
         }
     }
@@ -143,7 +182,6 @@ impl AppState {
             .unwrap_or(Role::Peer)
     }
 
-    /// Get all known superpeers (connected or not)
     pub async fn all_superpeers(&self) -> Vec<String> {
         self.peer_states.read().await
             .values()
@@ -159,11 +197,21 @@ impl AppState {
     pub async fn refresh_speaking(&self) {
         let last = self.last_audio.read().await;
         let mut states = self.peer_states.write().await;
+        let now = Instant::now();
         for (nick, ps) in states.iter_mut() {
             ps.speaking = last
                 .get(nick)
                 .map(|t| t.elapsed() < Duration::from_millis(400))
                 .unwrap_or(false);
+
+            // Timeout: if connecting for >10s, mark as NatIssue
+            if ps.conn_state == ConnState::Connecting {
+                if let Some(started) = ps.conn_started {
+                    if now.duration_since(started) > Duration::from_secs(10) {
+                        ps.conn_state = ConnState::NatIssue;
+                    }
+                }
+            }
         }
     }
 

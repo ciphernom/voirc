@@ -1,8 +1,41 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fmt;
 use std::path::PathBuf;
 use uuid::Uuid;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ConnState {
+    Connecting,
+    Connected,
+    NatIssue,
+    Relayed,
+    Failed,
+}
+
+impl fmt::Display for ConnState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConnState::Connecting => write!(f, "connecting..."),
+            ConnState::Connected => write!(f, "connected"),
+            ConnState::NatIssue => write!(f, "NAT issue - try relay"),
+            ConnState::Relayed => write!(f, "relayed"),
+            ConnState::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NetDiagnostics {
+    pub local_ip: Option<String>,
+    pub external_ip: Option<String>,
+    pub upnp_status: Option<String>,
+    pub turn_configured: usize,
+    pub relay_enabled: bool,
+    pub relay_port: Option<u16>,
+    pub port_open: Option<bool>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UserConfig {
@@ -22,8 +55,6 @@ pub struct RecentServer {
     pub last_connected: String,
 }
 
-/// TURN server credentials for NAT traversal behind symmetric NATs.
-/// Without this, users on corporate/university networks simply cannot connect.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TurnServer {
     pub url: String,
@@ -31,8 +62,6 @@ pub struct TurnServer {
     pub credential: String,
 }
 
-/// Peer role in a room. Host is the original server creator.
-/// Mods are promoted by the host and act as audio relay superpeers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Role {
     Host,
@@ -91,6 +120,14 @@ impl UserConfig {
         path
     }
 
+    pub fn tls_cert_dir() -> PathBuf {
+        let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+        path.push("voirc");
+        path.push("tls");
+        std::fs::create_dir_all(&path).ok();
+        path
+    }
+
     pub fn load() -> Result<Self> {
         let path = Self::config_path();
         if path.exists() {
@@ -112,17 +149,13 @@ impl UserConfig {
 
     pub fn add_recent_server(&mut self, name: String, connection_string: String) {
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
-
         self.recent_servers.retain(|s| s.connection_string != connection_string);
-
         self.recent_servers.insert(0, RecentServer {
             name,
             connection_string,
             last_connected: now,
         });
-
         self.recent_servers.truncate(10);
         let _ = self.save();
     }
-
 }

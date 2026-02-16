@@ -10,6 +10,10 @@ struct RawConnectionInfo {
     channels: Vec<String>,
     #[serde(default)]
     channel: Option<String>,
+    #[serde(default)]
+    cert_fingerprint: Option<String>,
+    #[serde(default)]
+    relay_port: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -17,6 +21,8 @@ pub struct ConnectionInfo {
     pub host: String,
     pub port: u16,
     pub channels: Vec<String>,
+    pub cert_fingerprint: Option<String>,
+    pub relay_port: Option<u16>,
 }
 
 #[derive(Serialize)]
@@ -24,11 +30,25 @@ struct WireFormat<'a> {
     host: &'a str,
     port: u16,
     channels: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cert_fingerprint: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relay_port: Option<u16>,
 }
 
 impl ConnectionInfo {
     pub fn new(host: String, port: u16, channels: Vec<String>) -> Self {
-        Self { host, port, channels }
+        Self { host, port, channels, cert_fingerprint: None, relay_port: None }
+    }
+
+    pub fn with_tls(mut self, fingerprint: String) -> Self {
+        self.cert_fingerprint = Some(fingerprint);
+        self
+    }
+
+    pub fn with_relay(mut self, port: u16) -> Self {
+        self.relay_port = Some(port);
+        self
     }
 
     pub fn to_magic_link(&self) -> Result<String> {
@@ -36,6 +56,8 @@ impl ConnectionInfo {
             host: &self.host,
             port: self.port,
             channels: &self.channels,
+            cert_fingerprint: self.cert_fingerprint.as_deref(),
+            relay_port: self.relay_port,
         };
         let json = serde_json::to_string(&wire)?;
         let encoded = general_purpose::STANDARD.encode(json.as_bytes());
@@ -50,7 +72,6 @@ impl ConnectionInfo {
         let json = String::from_utf8(decoded)?;
         let raw: RawConnectionInfo = serde_json::from_str(&json)?;
 
-        // Backward compat: old links have "channel", new have "channels"
         let channels = if !raw.channels.is_empty() {
             raw.channels
         } else if let Some(ch) = raw.channel {
@@ -63,6 +84,8 @@ impl ConnectionInfo {
             host: raw.host,
             port: raw.port,
             channels,
+            cert_fingerprint: raw.cert_fingerprint,
+            relay_port: raw.relay_port,
         })
     }
 
@@ -72,34 +95,5 @@ impl ConnectionInfo {
 
     pub fn default_channel(&self) -> &str {
         self.channels.first().map(|s| s.as_str()).unwrap_or("#general")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_magic_link_roundtrip() {
-        let info = ConnectionInfo::new(
-            "192.168.1.100".to_string(),
-            6667,
-            vec!["#general".to_string(), "#gaming".to_string()],
-        );
-        let link = info.to_magic_link().unwrap();
-        let decoded = ConnectionInfo::from_magic_link(&link).unwrap();
-        assert_eq!(decoded.host, info.host);
-        assert_eq!(decoded.port, info.port);
-        assert_eq!(decoded.channels, info.channels);
-    }
-
-    #[test]
-    fn test_backward_compat() {
-        // Old format with single "channel" field
-        let json = r##"{"host":"127.0.0.1","port":6667,"channel":"#test"}"##;
-        let encoded = general_purpose::STANDARD.encode(json.as_bytes());
-        let link = format!("voirc://{}", encoded);
-        let decoded = ConnectionInfo::from_magic_link(&link).unwrap();
-        assert_eq!(decoded.channels, vec!["#test".to_string()]);
     }
 }

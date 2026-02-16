@@ -1,24 +1,25 @@
 # Voirc
 
-Decentralized voice chat and file sharing application. Uses an embedded IRC server for signaling and coordination, establishing WebRTC mesh networks for peer-to-peer audio and data transfer.
+Decentralized voice chat and file sharing application. Uses an embedded, TLS-secured IRC server for signaling, establishing WebRTC connections for high-quality audio.
 
 **Repository:** [https://github.com/ciphernom/voirc](https://github.com/ciphernom/voirc)
 
 ## Architecture
 
-* **Signaling:** Embedded IRC server (TCP). Handles peer discovery, presence, and text chat.
-* **Media:** WebRTC (UDP/ICE). Handles peer-to-peer audio streaming (Opus codec).
-* **Data:** WebRTC Data Channels. Handles direct file transfer.
-* **Networking:** Automatic UPnP/IGD port forwarding for host nodes.
-* **GUI:** Immediate mode GUI using `egui`.
+* **Signaling:** Embedded IRC server (TCP/TLS). Handles peer discovery and chat.
+* **Media:** WebRTC (UDP/ICE) with a **Superpeer Topology** to reduce bandwidth usage.
+* **Fallback:** Custom TCP Audio Relay for users behind strict NATs (when P2P fails).
+* **Security:** Automatic self-signed certificate generation with **Certificate Pinning** via magic links.
+* **Data:** WebRTC Data Channels for direct file transfer.
 
 ## Features
 
 * **Self-Hosted:** Built-in IRCd allows hosting rooms without external infrastructure.
-* **Voice:** Low-latency, multi-peer voice mixing.
+* **Resilient:** Automatically falls back to a TCP relay if peer-to-peer connection fails.
+* **Secure:** Magic links include certificate fingerprints to prevent Man-in-the-Middle attacks.
+* **Voice:** Low-latency, multi-peer voice mixing (Opus codec).
 * **File Sharing:** Drag-and-drop transfer via direct P2P data channels.
-* **Magic Links:** Base64-encoded connection strings (`voirc://`) containing host IP, port, and channel configuration.
-* **Text Chat:** Standard IRC channel communication.
+* **Magic Links:** `voirc://` strings containing IP, port, security fingerprint, and channel config.
 
 ## Build & Run
 
@@ -58,7 +59,7 @@ cargo run --release
 3. Click **Start Server**.
 4. Share the generated `voirc://` link.
 
-*Note: The application attempts to open the port via UPnP. If UPnP fails, manual port forwarding is required.*
+*Note: The application attempts UPnP. If that fails, it will warn you, but the TCP Relay ensures friends can often still connect.*
 
 ### Joining
 

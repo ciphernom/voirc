@@ -1,27 +1,25 @@
-// src/voice_mixer.rs
-
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Stream, StreamConfig};
+use crossbeam::queue::ArrayQueue;
 use opus::{Application, Channels, Decoder, Encoder};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 const SAMPLE_RATE: u32 = 48000;
 const CHANNELS_COUNT: u16 = 1;
 const FRAME_SIZE: usize = 960;
+const RING_CAPACITY: usize = 64;
 
 pub struct VoiceMixer {
     input_device: Option<Device>,
     output_device: Device,
     config: StreamConfig,
-    incoming_audio: Arc<RwLock<Vec<Vec<f32>>>>,
+    ring: Arc<ArrayQueue<Vec<f32>>>,
 }
 
-/// Per-peer decoder state. Lives in the mixer task — never crosses threads.
 pub struct PeerDecoders {
     decoders: HashMap<String, Decoder>,
 }
@@ -54,14 +52,13 @@ impl VoiceMixer {
     pub fn new() -> Result<Self> {
         let host = cpal::default_host();
 
-        // Input device is optional — allows running without a mic for testing
         let input_device = match host.default_input_device() {
             Some(dev) => {
                 info!("Input device: {:?}", dev.name());
                 Some(dev)
             }
             None => {
-                warn!("No input device found — running in listen-only mode");
+                warn!("No input device found - running in listen-only mode");
                 None
             }
         };
@@ -79,21 +76,19 @@ impl VoiceMixer {
             input_device,
             output_device,
             config,
-            incoming_audio: Arc::new(RwLock::new(Vec::new())),
+            ring: Arc::new(ArrayQueue::new(RING_CAPACITY)),
         })
     }
 
-    /// Returns true if we have a microphone available.
     pub fn has_input(&self) -> bool {
         self.input_device.is_some()
     }
 
-    /// Start capturing from the microphone. Returns None if no mic is available.
     pub fn start_input(&self, audio_tx: mpsc::UnboundedSender<Vec<u8>>) -> Result<Option<Stream>> {
         let input_device = match &self.input_device {
             Some(dev) => dev,
             None => {
-                info!("No mic — skipping input stream");
+                info!("No mic - skipping input stream");
                 return Ok(None);
             }
         };
@@ -130,25 +125,34 @@ impl VoiceMixer {
 
     pub fn start_output(&self) -> Result<Stream> {
         let config = self.config.clone();
-        let incoming = Arc::clone(&self.incoming_audio);
+        let ring = Arc::clone(&self.ring);
 
         let stream = self.output_device.build_output_stream(
             &config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 data.fill(0.0);
-                let mut streams = incoming.blocking_write();
-                if streams.is_empty() { return; }
-                let gain = 1.0 / (streams.len() as f32).max(1.0).sqrt();
-                for buf in streams.iter_mut() {
+
+                let mut mixed = false;
+                let mut count = 0u32;
+
+                // Pop all available frames from the lock-free ring and mix
+                while let Some(buf) = ring.pop() {
+                    count += 1;
                     for (i, s) in data.iter_mut().enumerate() {
-                        if i < buf.len() { *s += buf[i] * gain; }
+                        if i < buf.len() {
+                            *s += buf[i];
+                        }
+                    }
+                    mixed = true;
+                }
+
+                // Normalize if we mixed multiple streams
+                if mixed && count > 1 {
+                    let gain = 1.0 / (count as f32).sqrt();
+                    for s in data.iter_mut() {
+                        *s *= gain;
                     }
                 }
-                let len = data.len();
-                for buf in streams.iter_mut() {
-                    if buf.len() >= len { buf.drain(0..len); } else { buf.clear(); }
-                }
-                streams.retain(|b| !b.is_empty());
             },
             |err| error!("Speaker error: {}", err),
             None,
@@ -157,7 +161,8 @@ impl VoiceMixer {
         Ok(stream)
     }
 
-    pub async fn queue_audio(&self, pcm: Vec<f32>) {
-        self.incoming_audio.write().await.push(pcm);
+    /// Lock-free push into ring buffer. Drops frame if full (better than blocking).
+    pub fn queue_audio(&self, pcm: Vec<f32>) {
+        let _ = self.ring.push(pcm); // drop if full
     }
 }

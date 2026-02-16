@@ -1,5 +1,3 @@
-// src/main.rs
-
 mod irc_client;
 mod state;
 mod voice_mixer;
@@ -11,6 +9,8 @@ mod upnp;
 mod gui;
 mod topology;
 mod moderation;
+mod tls;
+mod relay;
 
 use anyhow::Result;
 use tracing::info;
@@ -20,7 +20,6 @@ use crate::gui::VoircApp;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Setup logging
     let _ = std::fs::create_dir_all("logs");
     let file_appender = tracing_appender::rolling::daily("logs", "voirc.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
@@ -29,7 +28,9 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    // Load user config
+    // Install default rustls crypto provider
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let config = UserConfig::load()?;
     info!("Loaded config for user: {}", config.display_name);
 
