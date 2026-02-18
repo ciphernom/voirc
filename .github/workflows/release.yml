@@ -1,0 +1,73 @@
+name: Release Build
+
+on:
+  release:
+    types: [created]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-release:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: voirc-linux
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: voirc-windows.exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: voirc-macos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install Rust
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # LINUX SPECIFIC: Install Audio, GUI, & Build dependencies
+      - name: Install Linux Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # Audio & GUI deps
+          sudo apt-get install -y libasound2-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev libgtk-3-dev
+          # Build tools for C++ crates (webrtc-audio-processing & opus)
+          sudo apt-get install -y libclang-dev libopus-dev llvm-dev pkg-config
+
+      # WINDOWS SPECIFIC: Set up LLVM for Bindgen
+      # webrtc-audio-processing needs to find libclang.dll
+      - name: Setup Windows Environment
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $GITHUB_ENV
+
+      # Build the binary
+      - name: Build Binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Rename the artifact
+      - name: Rename Binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" == "windows-latest" ]; then
+            cp target/${{ matrix.target }}/release/voirc.exe ${{ matrix.name }}
+          else
+            cp target/${{ matrix.target }}/release/voirc ${{ matrix.name }}
+          fi
+
+      # Upload to Release
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ matrix.name }}
