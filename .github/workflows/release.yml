@@ -18,14 +18,32 @@ jobs:
             target: x86_64-unknown-linux-gnu
             name: voirc-linux
           - os: windows-latest
-            target: x86_64-pc-windows-msvc
+            target: x86_64-pc-windows-gnu
             name: voirc-windows.exe
           - os: macos-latest
             target: aarch64-apple-darwin
             name: voirc-macos
     steps:
       - uses: actions/checkout@v4
+      - name: Install Windows MSYS2 Tools
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          msystem: MINGW64
+          install: >-
+            base-devel
+            autoconf
+            automake
+            libtool
+            mingw-w64-x86_64-rust
+            mingw-w64-x86_64-clang
+            mingw-w64-x86_64-opus
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-toolchain
+          path-type: inherit
       - name: Install Rust
+        if: runner.os != 'Windows'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -36,30 +54,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev libgtk-3-dev
           sudo apt-get install -y libclang-dev libopus-dev llvm-dev pkg-config build-essential autoconf automake libtool
-      # --- WINDOWS ---
-      - name: Install Windows MSYS2 Tools
-        if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
-        with:
-          update: true
-          install: >-
-            base-devel
-            autoconf
-            automake
-            libtool
-            mingw-w64-x86_64-clang
-            mingw-w64-x86_64-opus
-            mingw-w64-x86_64-pkg-config
-          path-type: inherit
-      - name: Setup Windows Env
-        if: runner.os == 'Windows'
-        shell: msys2 {0}
-        run: |
-          echo "LIBCLANG_PATH=$(cygpath -w /mingw64/bin)" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=/mingw64/lib/pkgconfig" >> $GITHUB_ENV
-          echo "LIBTOOLIZE=C:/msys64/usr/bin/libtoolize" >> $GITHUB_ENV
-          echo "C:/msys64/usr/bin" >> $GITHUB_PATH
-          echo "C:/msys64/mingw64/bin" >> $GITHUB_PATH
       # --- MACOS ---
       - name: Install MacOS Dependencies
         if: runner.os == 'macOS'
@@ -72,7 +66,12 @@ jobs:
       - name: Build Binary (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
-        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          LIBCLANG_PATH: /mingw64/bin
+          PKG_CONFIG_PATH: /mingw64/lib/pkgconfig
+        run: |
+          export PATH="/mingw64/bin:$PATH"
+          cargo build --release --target x86_64-pc-windows-gnu
       - name: Rename Binary
         shell: bash
         run: |
