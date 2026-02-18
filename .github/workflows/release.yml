@@ -50,9 +50,14 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           update: true
-          # Install the Unix build tools required by webrtc-audio-processing
           install: base-devel autoconf automake libtool
           path-type: inherit
+
+      # FIX: Add MSYS2 binaries to the system PATH so Cargo can find 'libtoolize'
+      - name: Add MSYS2 to PATH
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: echo "C:\msys64\usr\bin" >> $env:GITHUB_PATH
 
       # Windows Hack: Rename msys2 link.exe to avoid conflict with MSVC link.exe
       - name: Fix Windows Linker
@@ -74,7 +79,6 @@ jobs:
       - name: Install MacOS Dependencies
         if: runner.os == 'macOS'
         run: |
-          # automake and libtool are required for glibtoolize
           brew install opus pkg-config automake libtool
 
       # --- BUILD ---
