@@ -31,38 +31,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Install Rust
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      # LINUX SPECIFIC: Install Audio, GUI, & Build dependencies
+      # --- LINUX ---
       - name: Install Linux Dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev libgtk-3-dev
-          sudo apt-get install -y libclang-dev libopus-dev llvm-dev pkg-config
+          sudo apt-get install -y libclang-dev libopus-dev llvm-dev pkg-config build-essential autoconf automake libtool
 
-      # WINDOWS SPECIFIC: Install Autotools for webrtc-audio-processing
-      - name: Install Windows Dependencies
+      # --- WINDOWS ---
+      - name: Install Windows MSYS2 Tools
         if: runner.os == 'Windows'
-        run: |
-          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
-          choco install -y make libtool autoconf automake
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          # Install the Unix build tools required by webrtc-audio-processing
+          install: base-devel autoconf automake libtool
+          path-type: inherit
 
-      # MACOS SPECIFIC: Install Opus to avoid compiling it from source (which fails)
+      # Windows Hack: Rename msys2 link.exe to avoid conflict with MSVC link.exe
+      - name: Fix Windows Linker
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $msys_link = "C:\msys64\usr\bin\link.exe"
+          if (Test-Path $msys_link) {
+            Rename-Item -Path $msys_link -NewName "link_msys.exe"
+            Write-Host "Renamed msys link.exe to prevent MSVC conflict"
+          }
+
+      - name: Setup Windows Env
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $GITHUB_ENV
+
+      # --- MACOS ---
       - name: Install MacOS Dependencies
         if: runner.os == 'macOS'
         run: |
-          brew install opus pkg-config
+          # automake and libtool are required for glibtoolize
+          brew install opus pkg-config automake libtool
 
-      # Build the binary
+      # --- BUILD ---
       - name: Build Binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      # Rename the artifact
       - name: Rename Binary
         shell: bash
         run: |
@@ -72,7 +90,6 @@ jobs:
             cp target/${{ matrix.target }}/release/voirc ${{ matrix.name }}
           fi
 
-      # Upload to Release
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v1
         with:
