@@ -53,22 +53,15 @@ jobs:
           install: base-devel autoconf automake libtool
           path-type: inherit
 
-      # FIX: Add MSYS2 binaries to the system PATH so Cargo can find 'libtoolize'
-      - name: Add MSYS2 to PATH
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: echo "C:\msys64\usr\bin" >> $env:GITHUB_PATH
-
-      # Windows Hack: Rename msys2 link.exe to avoid conflict with MSVC link.exe
-      - name: Fix Windows Linker
+      # CRITICAL FIX for Windows: Create a .bat shim for libtoolize
+      # Rust cannot execute the 'libtoolize' shell script directly on Windows.
+      - name: Shim libtoolize for Windows
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          $msys_link = "C:\msys64\usr\bin\link.exe"
-          if (Test-Path $msys_link) {
-            Rename-Item -Path $msys_link -NewName "link_msys.exe"
-            Write-Host "Renamed msys link.exe to prevent MSVC conflict"
-          }
+          $content = "@echo off`r`nsh /usr/bin/libtoolize %*"
+          Set-Content -Path "C:\msys64\usr\bin\libtoolize.bat" -Value $content
+          Write-Host "Created libtoolize.bat shim"
 
       - name: Setup Windows Env
         if: runner.os == 'Windows'
