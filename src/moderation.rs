@@ -23,6 +23,8 @@ pub enum Command {
     Invite,
     Reload,
     Diag,
+    SetPow(u8),
+    MineNick { bits: u8 },
     Custom { response: String, broadcast: bool },
     Unknown(String),
 }
@@ -47,6 +49,13 @@ pub fn parse_command(text: &str, custom_commands: &CustomCommands, context: &Com
         "/unmod" => arg.map(|a| Command::Mod(ModAction::Demote(a))),
         "/role" => Some(Command::ShowRole),
         "/peers" | "/who" => Some(Command::ListPeers),
+           "/powset" => arg
+               .and_then(|a| a.parse::<u8>().ok())
+               .map(Command::SetPow)
+               .or(Some(Command::Unknown("/powset <bits>".to_string()))),
+           "/mine" => Some(Command::MineNick {
+               bits: arg.and_then(|a| a.parse().ok()).unwrap_or(16),
+           }),
         "/editcommands" | "/commands" => Some(Command::EditCommands),
         "/invite" | "/link" => Some(Command::Invite),
         "/reload" => Some(Command::Reload),
@@ -93,12 +102,17 @@ pub fn help_text(our_role: Role, custom_commands: &CustomCommands) -> Vec<String
         "/editcommands   Open commands.toml for custom commands".to_string(),
         "/reload         Reload custom commands from disk".to_string(),
     ];
-
+   lines.push(format!(
+       "/mine [bits]    Mine a new nick at N bits (default 16, ~{})",
+       crate::pow::time_estimate(16)
+   ));
+   
     if our_role.can_moderate() {
         lines.push("/kick <nick>    Disconnect a user".to_string());
         lines.push("/ban <nick>     Ban a user".to_string());
         lines.push("/unban <nick>   Unban a user".to_string());
         lines.push("/listbanned     Show ban list".to_string());
+        lines.push("/powset <bits>  Change server PoW requirement (0=off)".to_string());
     }
 
     if our_role.can_promote() {

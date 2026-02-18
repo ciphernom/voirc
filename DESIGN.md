@@ -11,7 +11,7 @@ Superpeer / Star Topology (Tiered).
 
 **Audio**
 Opus codec (VoIP profile, 48kHz mono).
-Mixing: Software summation. Normalized by `1/sqrt(N)` to prevent clipping.
+Mixing: Software summation. Normalized by `soft_clip(sample) = tanh(sample * 1.5)` applied to the output buffer to prevent clipping.
 
 **Files**
 Transferred via WebRTC Data Channels (ordered, reliable).

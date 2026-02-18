@@ -186,15 +186,26 @@ impl VoiceMixer {
             buffer_size: cpal::BufferSize::Default,
         };
 
-        let (render, capture) = build_aec()?;
+        // AEC is best-effort — if it fails (e.g. unsupported sample rate),
+        // fall back gracefully. Voice still works, just without echo cancellation.
+        let (render, capture) = match build_aec() {
+            Ok((r, c)) => {
+                info!("AEC initialized");
+                (Some(r), Some(c))
+            }
+            Err(e) => {
+                warn!("AEC init failed ({}), running without echo cancellation", e);
+                (None, None)
+            }
+        };
 
         Ok(Self {
             input_device,
             output_device,
             config,
             net_ring: Arc::new(ArrayQueue::new(RING_CAPACITY)),
-            render_half: Mutex::new(Some(render)),
-            capture_half: Mutex::new(Some(capture)),
+            render_half: Mutex::new(render),
+            capture_half: Mutex::new(capture),
         })
     }
 
@@ -215,12 +226,8 @@ impl VoiceMixer {
             }
         };
 
-        let mut capture_half = self
-            .capture_half
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Input stream already started"))?;
+        let mut capture_half_opt = self.capture_half.lock().unwrap().take();
+
 
         let config = self.config.clone();
         let mut encoder = Encoder::new(SAMPLE_RATE, Channels::Mono, Application::Voip)?;
@@ -231,7 +238,11 @@ impl VoiceMixer {
         let stream = input_device.build_input_stream(
             &config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                capture_half.process(data, &mut opus_acc);
+                if let Some(ref mut ch) = capture_half_opt {
+                    ch.process(data, &mut opus_acc);
+                } else {
+                    opus_acc.extend_from_slice(data);
+                }
 
                 while opus_acc.len() >= FRAME_SIZE {
                     let frame: Vec<f32> = opus_acc.drain(..FRAME_SIZE).collect();
@@ -259,12 +270,8 @@ impl VoiceMixer {
         let config = self.config.clone();
         let net_ring = Arc::clone(&self.net_ring);
 
-        let mut render_half = self
-            .render_half
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Output stream already started"))?;
+        let mut render_half_opt = self.render_half.lock().unwrap().take();
+
 
         let stream = self.output_device.build_output_stream(
             &config,
@@ -283,7 +290,9 @@ impl VoiceMixer {
                     *s = Self::soft_clip(*s);
                 }
 
-                render_half.queue(data);
+                if let Some(ref mut rh) = render_half_opt {
+                    rh.queue(data);
+                }
             },
             |err| error!("Speaker error: {}", err),
             None,

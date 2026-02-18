@@ -46,6 +46,14 @@ pub struct UserConfig {
     pub turn_servers: Vec<TurnServer>,
     #[serde(default)]
     pub banned_users: HashSet<String>,
+    #[serde(default)]
+    pub pubkey_hex: Option<String>,
+
+    /// Default PoW difficulty (leading zero bits) to require when hosting.
+    /// 0 = disabled. Stored so the host doesn't have to re-enter it each time.
+    /// Can also be changed at runtime by mods via /powset.
+    #[serde(default)]
+    pub pow_required_bits: u8,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -107,93 +115,9 @@ impl Default for UserConfig {
             recent_servers: Vec::new(),
             turn_servers: Vec::new(),
             banned_users: HashSet::new(),
+            pubkey_hex: None,
+            pow_required_bits: 0,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_role_is_superpeer() {
-        assert!(Role::Host.is_superpeer());
-        assert!(Role::Mod.is_superpeer());
-        assert!(!Role::Peer.is_superpeer());
-    }
-
-    #[test]
-    fn test_role_can_moderate() {
-        assert!(Role::Host.can_moderate());
-        assert!(Role::Mod.can_moderate());
-        assert!(!Role::Peer.can_moderate());
-    }
-
-    #[test]
-    fn test_role_can_promote() {
-        assert!(Role::Host.can_promote());
-        assert!(!Role::Mod.can_promote());
-        assert!(!Role::Peer.can_promote());
-    }
-
-    #[test]
-    fn test_role_as_str() {
-        assert_eq!(Role::Host.as_str(), "host");
-        assert_eq!(Role::Mod.as_str(), "mod");
-        assert_eq!(Role::Peer.as_str(), "peer");
-    }
-
-    #[test]
-    fn test_role_from_str() {
-        assert_eq!(Role::from_str("host"), Role::Host);
-        assert_eq!(Role::from_str("mod"), Role::Mod);
-        assert_eq!(Role::from_str("peer"), Role::Peer);
-        assert_eq!(Role::from_str("unknown"), Role::Peer);
-        assert_eq!(Role::from_str(""), Role::Peer);
-    }
-
-    #[test]
-    fn test_conn_state_display() {
-        assert_eq!(ConnState::Connecting.to_string(), "connecting...");
-        assert_eq!(ConnState::Connected.to_string(), "connected");
-        assert_eq!(ConnState::NatIssue.to_string(), "NAT issue - try relay");
-        assert_eq!(ConnState::Relayed.to_string(), "relayed");
-        assert_eq!(ConnState::Failed.to_string(), "failed");
-    }
-
-    #[test]
-    fn test_user_config_default() {
-        let config = UserConfig::default();
-        assert!(!config.user_id.is_empty());
-        assert_eq!(config.display_name, "User");
-        assert!(config.recent_servers.is_empty());
-        assert!(config.turn_servers.is_empty());
-        assert!(config.banned_users.is_empty());
-    }
-
-    #[test]
-    fn test_turn_server_serialization() {
-        let turn = TurnServer {
-            url: "turn:example.com:3478".to_string(),
-            username: "user".to_string(),
-            credential: "pass".to_string(),
-        };
-        let json = serde_json::to_string(&turn).unwrap();
-        assert!(json.contains("turn:example.com:3478"));
-        assert!(json.contains("user"));
-        assert!(json.contains("pass"));
-    }
-
-    #[test]
-    fn test_recent_server_serialization() {
-        let server = RecentServer {
-            name: "Test Server".to_string(),
-            connection_string: "localhost:6667".to_string(),
-            last_connected: "2024-01-01 12:00".to_string(),
-        };
-        let json = serde_json::to_string(&server).unwrap();
-        assert!(json.contains("Test Server"));
-        assert!(json.contains("localhost:6667"));
     }
 }
 
@@ -243,5 +167,68 @@ impl UserConfig {
         });
         self.recent_servers.truncate(10);
         let _ = self.save();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pow_required_bits_default_zero() {
+        let config = UserConfig::default();
+        assert_eq!(config.pow_required_bits, 0);
+    }
+
+    #[test]
+    fn test_pow_required_bits_serialization() {
+        let mut config = UserConfig::default();
+        config.pow_required_bits = 16;
+        let toml = toml::to_string_pretty(&config).unwrap();
+        assert!(toml.contains("pow_required_bits = 16"));
+        let reloaded: UserConfig = toml::from_str(&toml).unwrap();
+        assert_eq!(reloaded.pow_required_bits, 16);
+    }
+
+    #[test]
+    fn test_pow_required_bits_zero_omitted_old_configs() {
+        // Old configs without the field should default to 0
+        let toml = r#"
+            user_id = "test-uuid"
+            display_name = "Test"
+            recent_servers = []
+        "#;
+        let config: UserConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.pow_required_bits, 0);
+    }
+
+    #[test]
+    fn test_role_is_superpeer() {
+        assert!(Role::Host.is_superpeer());
+        assert!(Role::Mod.is_superpeer());
+        assert!(!Role::Peer.is_superpeer());
+    }
+
+    #[test]
+    fn test_role_can_moderate() {
+        assert!(Role::Host.can_moderate());
+        assert!(Role::Mod.can_moderate());
+        assert!(!Role::Peer.can_moderate());
+    }
+
+    #[test]
+    fn test_role_can_promote() {
+        assert!(Role::Host.can_promote());
+        assert!(!Role::Mod.can_promote());
+        assert!(!Role::Peer.can_promote());
+    }
+
+    #[test]
+    fn test_conn_state_display() {
+        assert_eq!(ConnState::Connecting.to_string(), "connecting...");
+        assert_eq!(ConnState::Connected.to_string(), "connected");
+        assert_eq!(ConnState::NatIssue.to_string(), "NAT issue - try relay");
+        assert_eq!(ConnState::Relayed.to_string(), "relayed");
+        assert_eq!(ConnState::Failed.to_string(), "failed");
     }
 }

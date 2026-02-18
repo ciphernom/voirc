@@ -11,6 +11,8 @@ mod topology;
 mod moderation;
 mod tls;
 mod relay;
+mod persistence;
+mod pow; // <--- ADD THIS LINE
 
 use anyhow::Result;
 use tracing::info;

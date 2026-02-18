@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::config::{ConnState, NetDiagnostics, Role};
+use crate::persistence::{Identity, MessageLog};
 
 #[derive(Clone, Debug)]
 pub struct PeerState {
@@ -34,16 +35,24 @@ pub struct AppState {
     pub received_files: RwLock<Vec<SharedFile>>,
     pub our_role: RwLock<Role>,
     pub diagnostics: RwLock<NetDiagnostics>,
+    pub message_log: Arc<MessageLog>,
+    // Store known public keys for verification: Nick -> PubkeyHex
+    pub known_pubkeys: RwLock<HashMap<String, String>>,
+    pub identity: Option<Identity>,
     log_dir: PathBuf,
 }
 
 impl AppState {
-    pub fn new() -> Arc<Self> {
+    pub fn new(identity: Option<Identity>) -> Arc<Self> {
         let log_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("voirc")
             .join("logs");
         let _ = std::fs::create_dir_all(&log_dir);
+        let signed_log_dir = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("voirc")
+            .join("signed_logs");
 
         Arc::new(Self {
             peers: RwLock::new(HashMap::new()),
@@ -53,6 +62,9 @@ impl AppState {
             received_files: RwLock::new(Vec::new()),
             our_role: RwLock::new(Role::Peer),
             diagnostics: RwLock::new(NetDiagnostics::default()),
+            message_log: MessageLog::new(signed_log_dir),
+            known_pubkeys: RwLock::new(HashMap::new()),
+            identity,
             log_dir,
         })
     }
@@ -219,15 +231,38 @@ impl AppState {
         self.peers.write().await.remove(nick);
         self.peer_states.write().await.remove(nick);
         self.last_audio.write().await.remove(nick);
+        self.known_pubkeys.write().await.remove(nick);
     }
 
     pub async fn clear_peers(&self) {
         self.peers.write().await.clear();
         self.peer_states.write().await.clear();
         self.last_audio.write().await.clear();
+        self.known_pubkeys.write().await.clear();
     }
 
     pub async fn add_received_file(&self, from: String, name: String, size: usize, path: PathBuf) {
         self.received_files.write().await.push(SharedFile { from, name, size, path });
+    }
+
+    // --- Key Management Methods ---
+
+    pub async fn register_peer_pubkey(&self, nick: String, pubkey: String) -> bool {
+        let mut keys = self.known_pubkeys.write().await;
+        if let Some(existing) = keys.get(&nick) {
+            if existing != &pubkey {
+                return false; // Conflict
+            }
+        }
+        keys.insert(nick, pubkey);
+        true
+    }
+
+    pub async fn pubkey_for_nick(&self, nick: &str) -> Option<String> {
+        self.known_pubkeys.read().await.get(nick).cloned()
+    }
+
+    pub async fn trusted_keys_snapshot(&self) -> HashMap<String, String> {
+        self.known_pubkeys.read().await.clone()
     }
 }

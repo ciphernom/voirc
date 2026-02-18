@@ -83,10 +83,26 @@ pub struct VoircApp {
     file_status: Option<String>,
 
     upnp_warning: Option<String>,
+    /// PoW
+    /// Difficulty encoded in the magic link we're about to join.
+    /// Checked before connecting; triggers mining UI if nick is too weak.
+    pending_pow_bits: u8,
+    /// True while a mine_nick task is running in the background.
+    mining_in_progress: bool,
+    /// Queued ConnectionInfo waiting for a mined nick before connecting.
+    pending_connect: Option<(ConnectionInfo, bool)>, // (info, is_host)
+    /// Host difficulty setting (persisted in config).
+    host_pow_bits: u8,
+    
+    /// Storage for background mining result
+    mine_result: Arc<std::sync::Mutex<Option<crate::pow::MinedNick>>>,
 }
 
 impl VoircApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, config: UserConfig) -> Self {
+        // Extract bits before moving config
+        let pow_bits = config.pow_required_bits;
+        
         Self {
             config,
             screen: Screen::Dashboard,
@@ -108,6 +124,11 @@ impl VoircApp {
             call_state: None,
             file_status: None,
             upnp_warning: None,
+            pending_pow_bits: 0,
+            mining_in_progress: false,
+            pending_connect: None,
+            host_pow_bits: pow_bits,
+            mine_result: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -163,11 +184,30 @@ impl VoircApp {
                         ui.label(RichText::new("Port").size(14.0));
                         ui.text_edit_singleline(&mut self.host_port);
                         ui.add_space(15.0);
-                        ui.label(RichText::new("Channels (comma-separated)").size(14.0));
-                        ui.text_edit_singleline(&mut self.host_channels);
-                        ui.add_space(20.0);
+                         ui.label(RichText::new("Channels (comma-separated)").size(14.0));
+                         ui.text_edit_singleline(&mut self.host_channels);
+                         ui.add_space(15.0);
 
-                        if let Some(err) = &self.host_error {
+                         ui.label(RichText::new("Nick PoW Difficulty").size(14.0));
+                         ui.horizontal(|ui| {
+                             ui.add(egui::Slider::new(&mut self.host_pow_bits, 0u8..=24u8)
+                                 .text("bits"));
+                             let hint = if self.host_pow_bits == 0 {
+                                 "disabled — anyone can join instantly".to_string()
+                             } else {
+                                 format!(
+                                     "joiners whose nick was already mined to {}+ bits: instant. \
+                                     Others must mine a new nick once (~{}).",
+                                     self.host_pow_bits,
+                                     crate::pow::time_estimate(self.host_pow_bits)
+                                 )
+                             };
+                             ui.label(RichText::new(hint).size(11.0)
+                                 .color(egui::Color32::GRAY));
+                         });
+                         ui.add_space(20.0);
+
+                         if let Some(err) = &self.host_error {
                             ui.colored_label(egui::Color32::RED, err);
                             ui.add_space(10.0);
                         }
@@ -198,8 +238,16 @@ impl VoircApp {
                                 .fill(egui::Color32::from_rgb(40, 40, 40))
                                 .inner_margin(10.0)
                                 .show(ui, |ui| {
+                                    ui.set_max_width(480.0);
+                                    // Truncate for display — full link is still copied
+                                    let display = if link.len() > 48 {
+                                        format!("{}...", &link[..48])
+                                    } else {
+                                        link.clone()
+                                    };
                                     ui.horizontal(|ui| {
-                                        ui.monospace(link);
+                                        ui.monospace(display)
+                                            .on_hover_text(link);
                                         if ui.button("Copy").clicked() {
                                             ui.output_mut(|o| o.copied_text = link.clone());
                                             self.link_copied = true;
@@ -258,10 +306,23 @@ impl VoircApp {
                         ui.add_space(10.0);
                     }
 
-                    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if ui.add_sized([500.0, 40.0], egui::Button::new(RichText::new("Connect").size(16.0))).clicked() || enter {
-                        self.join_room();
-                    }
+                     let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                     if self.mining_in_progress {
+                         ui.horizontal(|ui| {
+                             ui.spinner();
+                             ui.label(RichText::new(format!(
+                                 "  Mining nick for {} bits…",
+                                 self.pending_pow_bits
+                             )).size(14.0).color(egui::Color32::YELLOW));
+                         });
+                     } else {
+                         if ui.add_sized([500.0, 40.0], egui::Button::new(
+                             RichText::new("Connect").size(16.0)
+                         )).clicked() || enter {
+                             self.join_room();
+                         }
+                     }
+
                 });
 
                 ui.add_space(20.0);
@@ -700,9 +761,10 @@ impl VoircApp {
             Ok(ci) => ci,
             Err(e) => {
                 warn!("TLS cert generation failed, falling back to plaintext: {}", e);
-                // Fall back to plaintext
+                // Fall back to plaintext, using 0 bits for fallback PoW (or self.host_pow_bits if safe)
+                let pow_bits = 0; 
                 tokio::spawn(async move {
-                    if let Err(e) = EmbeddedServer::run(port).await {
+                    if let Err(e) = EmbeddedServer::run(port, pow_bits).await {
                         error!("Server error: {}", e);
                     }
                 });
@@ -727,8 +789,11 @@ impl VoircApp {
             }
         };
 
-        let fingerprint = cert_info.fingerprint.clone();
-        let relay_port = port + 1;
+         let fingerprint = cert_info.fingerprint.clone();
+         let relay_port = port + 1;
+         let pow_bits = self.host_pow_bits;
+         self.config.pow_required_bits = pow_bits;
+         let _ = self.config.save();
 
         // Start TLS IRC server
         let cert_for_server = crate::tls::CertInfo {
@@ -737,7 +802,7 @@ impl VoircApp {
             fingerprint: cert_info.fingerprint.clone(),
         };
         tokio::spawn(async move {
-            if let Err(e) = EmbeddedServer::run_tls(port, &cert_for_server).await {
+            if let Err(e) = EmbeddedServer::run_tls(port, &cert_for_server, pow_bits).await {
                 error!("Server error: {}", e);
             }
         });
@@ -774,9 +839,10 @@ impl VoircApp {
             }
         });
 
-        let conn_info = ConnectionInfo::new("127.0.0.1".to_string(), port, channels.clone())
-            .with_tls(fingerprint.clone())
-            .with_relay(relay_port);
+         let conn_info = ConnectionInfo::new("127.0.0.1".to_string(), port, channels.clone())
+             .with_tls(fingerprint.clone())
+             .with_relay(relay_port)
+             .with_pow(pow_bits);
         self.host_link = conn_info.to_magic_link().ok();
         self.link_copied = false;
 
@@ -785,9 +851,10 @@ impl VoircApp {
         let fp = fingerprint;
         tokio::spawn(async move {
             if let Ok(ip) = PortForwarder::get_external_ip(None).await {
-                let info = ConnectionInfo::new(ip, port, ch)
-                    .with_tls(fp)
-                    .with_relay(relay_port);
+                 let info = ConnectionInfo::new(ip, port, ch)
+                      .with_tls(fp)
+                      .with_relay(relay_port)
+                      .with_pow(pow_bits);
                 if let Ok(link) = info.to_magic_link() {
                     info!("External magic link: {}", link);
                     *external.write().await = Some(link);
@@ -798,25 +865,75 @@ impl VoircApp {
         self.host_error = None;
     }
 
-    fn join_room(&mut self) {
-        match ConnectionInfo::from_magic_link(&self.join_input) {
-            Ok(info) => self.connect_to_server(info, false),
-            Err(e) => self.join_error = Some(format!("Invalid link: {}", e)),
-        }
-    }
+     fn join_room(&mut self) {
+         let info = match ConnectionInfo::from_magic_link(&self.join_input) {
+             Ok(i) => i,
+             Err(e) => { self.join_error = Some(format!("Invalid link: {}", e)); return; }
+         };
+
+         let required = info.pow_required_bits;
+         if required == 0 {
+             // No PoW — connect directly.
+             self.connect_to_server(info, false);
+             return;
+         }
+
+         // Load identity to check current nick.
+         let identity = crate::persistence::Identity::load_or_generate(
+             &UserConfig::tls_cert_dir()
+         ).ok();
+
+         let nick_ok = identity.as_ref().map(|id| {
+             crate::pow::check_difficulty(&self.config.display_name, &id.pubkey_hex, required)
+         }).unwrap_or(false);
+
+         if nick_ok {
+             // Current nick already meets the bar — connect directly.
+             self.connect_to_server(info, false);
+             return;
+         }
+
+         // Nick is too weak. Start mining in the background, queue the connect.
+         let actual_bits = identity.as_ref().map(|id| {
+             crate::pow::leading_zero_bits(&crate::pow::nick_hash(
+                 &self.config.display_name, &id.pubkey_hex
+             ))
+         }).unwrap_or(0);
+
+         self.pending_pow_bits = required;
+         self.pending_connect = Some((info, false));
+         self.mining_in_progress = true;
+         self.join_error = Some(format!(
+             "Your nick has {} PoW bits but this server requires {}. \
+              Mining a new nick (~{})…",
+             actual_bits, required,
+             crate::pow::time_estimate(required)
+         ));
+
+         // Kick off background mine.
+         let base = crate::pow::base_name(&self.config.display_name).to_string();
+         let pubkey = identity.map(|id| id.pubkey_hex).unwrap_or_default();
+
+         let mine_result = Arc::clone(&self.mine_result);
+         tokio::task::spawn_blocking(move || {
+             let result = crate::pow::mine_nick(&base, &pubkey, required, 200_000_000);
+             if let Ok(mut guard) = mine_result.lock() {
+                 *guard = result;
+             }
+         });
+     }
 
 fn connect_to_server(&mut self, conn_info: ConnectionInfo, is_host: bool) {
-        let state = AppState::new();
+        let identity = crate::persistence::Identity::load_or_generate(&UserConfig::tls_cert_dir()).ok();
+        let state = AppState::new(identity);
         let nickname = self.config.display_name.clone();
         let channels_vec = conn_info.channels.clone();
         let default_channel = conn_info.default_channel().to_string();
         let turn_servers = self.config.turn_servers.clone();
         let banned_users = self.config.banned_users.clone();
         
-        // --- CHANGE: Capture the fingerprint explicitly ---
         let cert_fingerprint = conn_info.cert_fingerprint.clone();
         let use_tls = cert_fingerprint.is_some();
-        // --------------------------------------------------
 
         let relay_port = conn_info.relay_port;
         let relay_addr = if let Some(rp) = relay_port {
@@ -917,9 +1034,7 @@ fn connect_to_server(&mut self, conn_info: ConnectionInfo, is_host: bool) {
                     nick_c.clone(),
                     default_channel.clone(),
                     state_c.clone(),
-                    // --- CHANGE: Pass the fingerprint instead of bool ---
                     cert_fingerprint,
-                    // ----------------------------------------------------
                 ),
             );
 
@@ -1299,9 +1414,84 @@ fn connect_to_server(&mut self, conn_info: ConnectionInfo, is_host: bool) {
                                     moderation::Command::Unknown(cmd) => {
                                         state.add_message(&ch, format!("Unknown command: {}. Type /help for commands.", cmd)).await;
                                     }
+                                  moderation::Command::SetPow(bits) => {
+                                      if !our_role.can_moderate() {
+                                          state.add_message(&ch, "Only host/mod can change PoW difficulty.".to_string()).await;
+                                      } else {
+                                          let _ = irc.send_pow_set(bits);
+                                          // Confirmation arrives via PowRequirementChanged broadcast from server.
+                                      }
+                                  }
+                                  moderation::Command::MineNick { bits } => {
+                                      // /mine lets you pre-emptively grind a stronger nick while you're
+                                      // already in the room, ready for when you next reconnect or join
+                                      // a room with stricter requirements.
+                                      let base = crate::pow::base_name(&nickname).to_string();
+                                      let pubkey = state.identity.as_ref()
+                                          .map(|id| id.pubkey_hex.clone())
+                                          .unwrap_or_default();
+                                      if pubkey.is_empty() {
+                                          state.add_message(&ch, "No identity key found.".to_string()).await;
+                                      } else {
+                                          let already_ok = crate::pow::check_difficulty(&nickname, &pubkey, bits);
+                                          if already_ok {
+                                              let actual = crate::pow::leading_zero_bits(
+                                                  &crate::pow::nick_hash(&nickname, &pubkey)
+                                              );
+                                              state.add_message(&ch, format!(
+                                                  "Your current nick '{}' already has {} bits — no need to re-mine for {} bits.",
+                                                  nickname, actual, bits
+                                              )).await;
+                                          } else {
+                                              state.add_message(&ch, format!(
+                                                  "Mining '{}' at {} bits (~{})…",
+                                                  base, bits, crate::pow::time_estimate(bits)
+                                              )).await;
+                                              let state_c = Arc::clone(&state);
+                                              let ch_c = ch.clone();
+                                              tokio::task::spawn_blocking(move || {
+                                                  let result = crate::pow::mine_nick(&base, &pubkey, bits, 200_000_000);
+                                                  let handle = tokio::runtime::Handle::current();
+                                                  handle.block_on(async move {
+                                                      match result {
+                                                          Some(m) => state_c.add_message(&ch_c, format!(
+                                                              "✓ New nick ready: '{}' ({} bits, {} attempts). \
+                                                               Go to Settings → Display Name, paste it, then reconnect.",
+                                                              m.nick, m.bits, m.attempts
+                                                          )).await,
+                                                          None => state_c.add_message(&ch_c,
+                                                              "Mining failed (limit reached). Try a lower difficulty.".to_string()
+                                                          ).await,
+                                                      }
+                                                  });
+                                              });
+                                          }
+                                      }
+                                  }
                                 }
                             } else {
-                                if let Err(e) = irc.send_message(&ch, &text) {
+                                // Sign the message if we have an identity
+                                let send_result = if let Some(ref identity) = state.identity {
+                                    let timestamps = state.message_log.recent_timestamps(&ch).await;
+                                    match crate::persistence::SignedMessage::create(
+                                        identity, &nickname, &ch, &text, &timestamps,
+                                    ) {
+                                        Ok(signed) => {
+                                            let json = serde_json::to_string(&signed)
+                                                .unwrap_or_default();
+                                            state.message_log.append(signed).await.ok();
+                                            irc.send_message(&ch, &format!("SIGNED:{}", json))
+                                        }
+                                        Err(e) => {
+                                            error!("Sign failed, sending plain: {}", e);
+                                            irc.send_message(&ch, &text)
+                                        }
+                                    }
+                                } else {
+                                    irc.send_message(&ch, &text)
+                                };
+
+                                if let Err(e) = send_result {
                                     error!("Send: {}", e);
                                 } else {
                                     state.add_message(&ch, format!("<{}> {}", nickname, text)).await;
@@ -1471,6 +1661,18 @@ fn connect_to_server(&mut self, conn_info: ConnectionInfo, is_host: bool) {
 
                             reconnect_attempts.write().await.remove(&nick);
 
+                            // Request message sync from the joining peer
+                            {
+                                let ch = current_channel.read().await.clone();
+                                let since = state.message_log
+                                    .messages_since(&ch, 0).await
+                                    .last()
+                                    .map(|m| m.timestamp)
+                                    .unwrap_or(0);
+                                let req = crate::persistence::make_sync_request(&ch, since);
+                                let _ = irc.send_message(&nick, &format!("VOIRC_SYNC_REQ:{}", req));
+                            }
+
                             maybe_create_peer(
                                 &nick, &nickname, our_role, &state, &peers,
                                 &irc, &mix_tx, &ice_out_tx, &file_tx,
@@ -1485,6 +1687,21 @@ fn connect_to_server(&mut self, conn_info: ConnectionInfo, is_host: bool) {
                             state.remove_peer(&nick).await;
                             reconnect_attempts.write().await.remove(&nick);
                         }
+
+                       IrcEvent::PowRequirementChanged { bits } => {
+                           let ch = current_channel.read().await.clone();
+                           if bits == 0 {
+                               state.add_message(&ch,
+                                   "PoW requirement removed — anyone can now register a nick.".to_string()
+                               ).await;
+                           } else {
+                               state.add_message(&ch, format!(
+                                   "⚡ Nick PoW requirement changed to {} bits. \
+                                    Reconnecting users whose nick has < {} bits will need to /mine first (~{}).",
+                                   bits, bits, crate::pow::time_estimate(bits)
+                               )).await;
+                           }
+                       }
 
                         IrcEvent::WebRtcSignal { from, payload } => {
                             match serde_json::from_str::<WebRtcSignal>(&payload) {
@@ -1574,6 +1791,16 @@ fn connect_to_server(&mut self, conn_info: ConnectionInfo, is_host: bool) {
                                 _ => {}
                             }
                         }
+                        
+                        // FIX: Added handler for PowTooWeak
+                        IrcEvent::PowTooWeak { required_bits } => {
+                            let ch = current_channel.read().await.clone();
+                            state.add_message(&ch, format!(
+                                "❌ Connection Rejected: Your nick's Proof-of-Work is too weak. \
+                                 Server requires {} bits. Please run '/mine {}' to upgrade your nick.",
+                                required_bits, required_bits
+                            )).await;
+                        }
                     }
                 }
 
@@ -1597,6 +1824,26 @@ fn connect_to_server(&mut self, conn_info: ConnectionInfo, is_host: bool) {
 impl eframe::App for VoircApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
+
+     // Poll for a completed nick mine.
+     let mine_result = {
+         self.mine_result.lock().ok().and_then(|mut g| g.take())
+     };
+     if let Some(mined) = mine_result {
+         self.mining_in_progress = false;
+         // Update the display name to the newly mined nick.
+         self.config.display_name = mined.nick.clone();
+         let _ = self.config.save();
+         self.join_error = Some(format!(
+             "✓ New nick '{}' ({} bits). Connecting…",
+             mined.nick, mined.bits
+         ));
+         // Now that the nick is strong enough, fire the queued connection.
+         if let Some((info, is_host)) = self.pending_connect.take() {
+             self.connect_to_server(info, is_host);
+         }
+     }        
+        
         match self.screen {
             Screen::Dashboard => self.render_dashboard(ctx),
             Screen::HostSetup => self.render_host_setup(ctx),

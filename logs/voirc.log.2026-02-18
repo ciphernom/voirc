@@ -1,0 +1,166 @@
+2026-02-18T03:03:18.524103Z  INFO voirc: Loaded config for user: k
+2026-02-18T03:03:18.552482Z  INFO winit::platform_impl::linux::x11::window: Guessed window scale factor: 1
+2026-02-18T03:03:23.378968Z  INFO voirc::relay: Audio relay listening on 0.0.0.0:6668
+2026-02-18T03:03:23.378970Z  INFO voirc::upnp: Attempting UPnP port forward for port 6667
+2026-02-18T03:03:23.379223Z  INFO voirc::irc_server: Embedded IRC Server listening on 0.0.0.0:6667 (TLS)
+2026-02-18T03:03:33.735090Z  WARN voirc::upnp: UPnP gateway not found: IO error: Resource temporarily unavailable (os error 11)
+2026-02-18T03:03:33.735198Z  INFO voirc::gui: UPnP failed (not critical): UPnP not available: IO error: Resource temporarily unavailable (os error 11)
+2026-02-18T03:03:33.736080Z  INFO voirc::upnp: UPnP IP lookup failed, trying api.ipify.org...
+2026-02-18T03:03:34.125711Z  INFO voirc::upnp: Obtained external IP via HTTP: 206.83.122.46
+2026-02-18T03:03:34.125886Z  INFO voirc::gui: External magic link: voirc://eyJob3N0IjoiMjA2LjgzLjEyMi40NiIsInBvcnQiOjY2NjcsImNoYW5uZWxzIjpbIiNnZW5lcmFsIiwiI2dhbWluZyJdLCJjZXJ0X2ZpbmdlcnByaW50IjoiMzBhNDAxOGY2OTJmMjRlZDFjMWE1M2JlMDNhZDQxYWRjOTY5ODRmMWNmYTRkMWFiOTVjMWQyODBkOGU5MWZlNCIsInJlbGF5X3BvcnQiOjY2Njh9
+2026-02-18T03:04:04.269990Z  INFO voirc::persistence: Generated new identity key at "/home/nick/.config/voirc/tls/identity.key"
+2026-02-18T03:04:04.271582Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:04:04.271928Z ERROR voirc::gui: Mixer: ffi::AudioProcessing::Error code: -9
+2026-02-18T03:05:06.651754Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:05:06.652097Z ERROR voirc::gui: Mixer: ffi::AudioProcessing::Error code: -9
+2026-02-18T03:05:06.713639Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:05:06.713793Z ERROR voirc::gui: Mixer: ffi::AudioProcessing::Error code: -9
+2026-02-18T03:05:13.440661Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:05:13.440826Z ERROR voirc::gui: Mixer: ffi::AudioProcessing::Error code: -9
+2026-02-18T03:05:14.617774Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:05:14.617972Z ERROR voirc::gui: Mixer: ffi::AudioProcessing::Error code: -9
+2026-02-18T03:05:14.764560Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:05:14.764834Z ERROR voirc::gui: Mixer: ffi::AudioProcessing::Error code: -9
+2026-02-18T03:05:14.938937Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:05:14.939130Z ERROR voirc::gui: Mixer: ffi::AudioProcessing::Error code: -9
+2026-02-18T03:05:15.103102Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:05:15.103312Z ERROR voirc::gui: Mixer: ffi::AudioProcessing::Error code: -9
+2026-02-18T03:05:15.256851Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:05:15.257108Z ERROR voirc::gui: Mixer: ffi::AudioProcessing::Error code: -9
+2026-02-18T03:05:15.338845Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:05:15.339098Z ERROR voirc::gui: Mixer: ffi::AudioProcessing::Error code: -9
+2026-02-18T03:05:15.405465Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:05:15.405707Z ERROR voirc::gui: Mixer: ffi::AudioProcessing::Error code: -9
+2026-02-18T03:05:15.568023Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:05:15.568284Z ERROR voirc::gui: Mixer: ffi::AudioProcessing::Error code: -9
+2026-02-18T03:05:15.750922Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:05:15.751213Z ERROR voirc::gui: Mixer: ffi::AudioProcessing::Error code: -9
+2026-02-18T03:05:17.203968Z  WARN arboard::platform::linux::x11: Could not hand the clipboard contents over to the clipboard manager. The request timed out.
+2026-02-18T03:11:45.576883Z  INFO voirc: Loaded config for user: k
+2026-02-18T03:11:45.606327Z  INFO winit::platform_impl::linux::x11::window: Guessed window scale factor: 1
+2026-02-18T03:11:51.769396Z  INFO voirc::relay: Audio relay listening on 0.0.0.0:6668
+2026-02-18T03:11:51.769425Z  INFO voirc::upnp: Attempting UPnP port forward for port 6667
+2026-02-18T03:11:51.769927Z  INFO voirc::irc_server: Embedded IRC Server listening on 0.0.0.0:6667 (TLS)
+2026-02-18T03:12:02.151103Z  INFO voirc::upnp: UPnP IP lookup failed, trying api.ipify.org...
+2026-02-18T03:12:02.151099Z  WARN voirc::upnp: UPnP gateway not found: IO error: Resource temporarily unavailable (os error 11)
+2026-02-18T03:12:02.151216Z  INFO voirc::gui: UPnP failed (not critical): UPnP not available: IO error: Resource temporarily unavailable (os error 11)
+2026-02-18T03:12:02.536483Z  INFO voirc::upnp: Obtained external IP via HTTP: 206.83.122.46
+2026-02-18T03:12:02.536639Z  INFO voirc::gui: External magic link: voirc://eyJob3N0IjoiMjA2LjgzLjEyMi40NiIsInBvcnQiOjY2NjcsImNoYW5uZWxzIjpbIiNnZW5lcmFsIiwiI2dhbWluZyJdLCJjZXJ0X2ZpbmdlcnByaW50IjoiMzBhNDAxOGY2OTJmMjRlZDFjMWE1M2JlMDNhZDQxYWRjOTY5ODRmMWNmYTRkMWFiOTVjMWQyODBkOGU5MWZlNCIsInJlbGF5X3BvcnQiOjY2Njh9
+2026-02-18T03:12:03.741444Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:12:03.741737Z  WARN voirc::voice_mixer: AEC init failed (ffi::AudioProcessing::Error code: -9), running without echo cancellation
+2026-02-18T03:12:03.846595Z  INFO voirc::irc_client: Connecting to 127.0.0.1:6667...
+2026-02-18T03:12:03.846988Z  INFO voirc::irc_client: Upgrading to TLS (Pinned Fingerprint: 30a4018f...)
+2026-02-18T03:12:03.852945Z  INFO voirc::relay: Relay client connected: k (127.0.0.1:49056)
+2026-02-18T03:12:03.852949Z  INFO voirc::relay: Connected to relay as k
+2026-02-18T03:12:03.852988Z  INFO voirc::gui: Relay connection established
+2026-02-18T03:12:08.052465Z  INFO voirc::gui: Switching #general -> #gaming
+2026-02-18T03:12:09.231617Z  INFO voirc::gui: Switching #gaming -> #general
+2026-02-18T03:14:27.373883Z  INFO voirc: Loaded config for user: k
+2026-02-18T03:14:27.404114Z  INFO winit::platform_impl::linux::x11::window: Guessed window scale factor: 1
+2026-02-18T03:14:30.687419Z  INFO voirc::upnp: Attempting UPnP port forward for port 6667
+2026-02-18T03:14:30.687456Z  INFO voirc::relay: Audio relay listening on 0.0.0.0:6668
+2026-02-18T03:14:30.687657Z  INFO voirc::irc_server: Embedded IRC Server listening on 0.0.0.0:6667 (TLS)
+2026-02-18T03:14:30.774861Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:14:30.775207Z  WARN voirc::voice_mixer: AEC init failed (ffi::AudioProcessing::Error code: -9), running without echo cancellation
+2026-02-18T03:14:30.867630Z  INFO voirc::irc_client: Connecting to 127.0.0.1:6667...
+2026-02-18T03:14:30.868110Z  INFO voirc::irc_client: Upgrading to TLS (Pinned Fingerprint: 30a4018f...)
+2026-02-18T03:14:30.873476Z  INFO voirc::relay: Connected to relay as k
+2026-02-18T03:14:30.873484Z  INFO voirc::relay: Relay client connected: k (127.0.0.1:60992)
+2026-02-18T03:14:30.873530Z  INFO voirc::gui: Relay connection established
+2026-02-18T03:14:33.863420Z  INFO voirc::gui: Shutdown
+2026-02-18T03:14:33.863501Z  INFO voirc::gui: Event loop exiting
+2026-02-18T03:14:33.865286Z  INFO voirc::relay: Relay client disconnected: k (127.0.0.1:60992)
+2026-02-18T03:14:40.871146Z  INFO voirc::upnp: UPnP IP lookup failed, trying api.ipify.org...
+2026-02-18T03:14:40.871136Z  WARN voirc::upnp: UPnP gateway not found: IO error: Resource temporarily unavailable (os error 11)
+2026-02-18T03:14:40.871255Z  INFO voirc::gui: UPnP failed (not critical): UPnP not available: IO error: Resource temporarily unavailable (os error 11)
+2026-02-18T03:14:41.396194Z  INFO voirc::upnp: Obtained external IP via HTTP: 206.83.122.46
+2026-02-18T03:14:41.396356Z  INFO voirc::gui: External magic link: voirc://eyJob3N0IjoiMjA2LjgzLjEyMi40NiIsInBvcnQiOjY2NjcsImNoYW5uZWxzIjpbIiNnZW5lcmFsIiwiI2dhbWluZyJdLCJjZXJ0X2ZpbmdlcnByaW50IjoiMzBhNDAxOGY2OTJmMjRlZDFjMWE1M2JlMDNhZDQxYWRjOTY5ODRmMWNmYTRkMWFiOTVjMWQyODBkOGU5MWZlNCIsInJlbGF5X3BvcnQiOjY2Njh9
+2026-02-18T03:14:46.595734Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T03:14:46.595895Z  WARN voirc::voice_mixer: AEC init failed (ffi::AudioProcessing::Error code: -9), running without echo cancellation
+2026-02-18T03:14:46.684410Z  INFO voirc::irc_client: Connecting to 127.0.0.1:6667...
+2026-02-18T03:14:46.684851Z  INFO voirc::irc_client: Upgrading to TLS (Pinned Fingerprint: 30a4018f...)
+2026-02-18T03:14:46.689685Z  INFO voirc::relay: Connected to relay as k
+2026-02-18T03:14:46.689710Z  INFO voirc::irc_client: Peer k announced role: Host
+2026-02-18T03:14:46.689731Z  INFO voirc::gui: Relay connection established
+2026-02-18T03:14:46.689738Z  INFO voirc::relay: Relay client connected: k (127.0.0.1:45356)
+2026-02-18T03:14:54.339932Z  INFO voirc::gui: Switching #general -> #gaming
+2026-02-18T03:14:55.022877Z  INFO voirc::gui: Switching #gaming -> #general
+2026-02-18T03:14:55.064888Z  INFO voirc::irc_client: Peer k announced role: Host
+2026-02-18T03:14:57.096274Z  WARN arboard::platform::linux::x11: Could not hand the clipboard contents over to the clipboard manager. The request timed out.
+2026-02-18T04:37:26.888104Z  INFO voirc: Loaded config for user: k
+2026-02-18T04:37:26.916393Z  INFO winit::platform_impl::linux::x11::window: Guessed window scale factor: 1
+2026-02-18T04:37:36.277936Z  INFO voirc::upnp: Attempting UPnP port forward for port 6667
+2026-02-18T04:37:36.277968Z  INFO voirc::relay: Audio relay listening on 0.0.0.0:6668
+2026-02-18T04:37:36.278388Z  INFO voirc::irc_server: Embedded IRC Server listening on 0.0.0.0:6667 (TLS) pow_required_bits=4
+2026-02-18T04:37:46.727125Z  INFO voirc::upnp: UPnP IP lookup failed, trying api.ipify.org...
+2026-02-18T04:37:46.727120Z  WARN voirc::upnp: UPnP gateway not found: IO error: Resource temporarily unavailable (os error 11)
+2026-02-18T04:37:46.727216Z  INFO voirc::gui: UPnP failed (not critical): UPnP not available: IO error: Resource temporarily unavailable (os error 11)
+2026-02-18T04:37:47.239167Z  INFO voirc::upnp: Obtained external IP via HTTP: 206.83.122.46
+2026-02-18T04:37:47.239335Z  INFO voirc::gui: External magic link: voirc://eyJob3N0IjoiMjA2LjgzLjEyMi40NiIsInBvcnQiOjY2NjcsImNoYW5uZWxzIjpbIiNnZW5lcmFsIiwiI2dhbWluZyJdLCJjZXJ0X2ZpbmdlcnByaW50IjoiMzBhNDAxOGY2OTJmMjRlZDFjMWE1M2JlMDNhZDQxYWRjOTY5ODRmMWNmYTRkMWFiOTVjMWQyODBkOGU5MWZlNCIsInJlbGF5X3BvcnQiOjY2NjgsInBvd19yZXF1aXJlZF9iaXRzIjo0fQ==
+2026-02-18T04:37:50.478417Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T04:37:50.478743Z  WARN voirc::voice_mixer: AEC init failed (ffi::AudioProcessing::Error code: -9), running without echo cancellation
+2026-02-18T04:37:50.574210Z  INFO voirc::irc_client: Connecting to 127.0.0.1:6667...
+2026-02-18T04:37:50.574573Z  INFO voirc::irc_client: Upgrading to TLS (Pinned Fingerprint: 30a4018f...)
+2026-02-18T04:37:50.581753Z  INFO voirc::relay: Connected to relay as k
+2026-02-18T04:37:50.581794Z  INFO voirc::gui: Relay connection established
+2026-02-18T04:37:50.581753Z  INFO voirc::relay: Relay client connected: k (127.0.0.1:59078)
+2026-02-18T04:37:50.662279Z  INFO voirc::irc_client: Server requires 4 PoW bits for nick registration
+2026-02-18T04:37:50.848055Z  WARN voirc::irc_server: VOIRC_HELLO PoW too weak for k: 0 bits < 4 required
+2026-02-18T04:37:50.848368Z  WARN voirc::irc_client: Nick 'k' PoW too weak — server requires 4 bits
+2026-02-18T04:38:09.635862Z  INFO voirc::gui: Shutdown
+2026-02-18T04:38:09.635928Z  INFO voirc::gui: Event loop exiting
+2026-02-18T04:38:09.638259Z  INFO voirc::relay: Relay client disconnected: k (127.0.0.1:59078)
+2026-02-18T04:38:18.855478Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T04:38:18.855715Z  WARN voirc::voice_mixer: AEC init failed (ffi::AudioProcessing::Error code: -9), running without echo cancellation
+2026-02-18T04:38:18.940383Z  INFO voirc::irc_client: Connecting to 127.0.0.1:6667...
+2026-02-18T04:38:18.940807Z  INFO voirc::irc_client: Upgrading to TLS (Pinned Fingerprint: 30a4018f...)
+2026-02-18T04:38:18.947742Z  WARN voirc::irc_client: Dropping VOIRC_ROLE from unverified peer nick
+2026-02-18T04:38:18.948555Z  INFO voirc::relay: Relay client connected: nick (127.0.0.1:58664)
+2026-02-18T04:38:18.948587Z  INFO voirc::relay: Connected to relay as nick
+2026-02-18T04:38:18.948629Z  INFO voirc::gui: Relay connection established
+2026-02-18T04:38:18.988397Z  INFO voirc::irc_client: Server requires 4 PoW bits for nick registration
+2026-02-18T04:38:19.197144Z  WARN voirc::irc_server: VOIRC_HELLO PoW too weak for nick: 1 bits < 4 required
+2026-02-18T04:38:19.197427Z  WARN voirc::irc_client: Nick 'nick' PoW too weak — server requires 4 bits
+2026-02-18T04:38:19.490105Z  INFO voirc::gui: Joined: k (role: Peer)
+2026-02-18T04:38:19.531559Z  WARN voirc::irc_client: Dropping VOIRC_SYNC_REQ from unverified peer nick
+2026-02-18T04:38:19.556321Z  WARN voirc::irc_server: VOIRC_HELLO PoW too weak for k: 0 bits < 4 required
+2026-02-18T04:38:19.572255Z  WARN voirc::irc_client: Nick 'k' PoW too weak — server requires 4 bits
+2026-02-18T04:38:47.443913Z  INFO voirc::gui: Shutdown
+2026-02-18T04:38:47.443977Z  INFO voirc::gui: Event loop exiting
+2026-02-18T04:38:47.446326Z  INFO voirc::relay: Relay client disconnected: nick (127.0.0.1:58664)
+2026-02-18T04:38:57.516936Z  INFO voirc::voice_mixer: Input device: Ok("default")
+2026-02-18T04:38:57.517199Z  WARN voirc::voice_mixer: AEC init failed (ffi::AudioProcessing::Error code: -9), running without echo cancellation
+2026-02-18T04:38:57.610291Z  INFO voirc::irc_client: Connecting to 127.0.0.1:6667...
+2026-02-18T04:38:57.610595Z  INFO voirc::irc_client: Upgrading to TLS (Pinned Fingerprint: 30a4018f...)
+2026-02-18T04:38:57.616145Z  INFO voirc::relay: Relay client connected: nick#0060 (127.0.0.1:54218)
+2026-02-18T04:38:57.616152Z  INFO voirc::relay: Connected to relay as nick#0060
+2026-02-18T04:38:57.616171Z  INFO voirc::gui: Relay connection established
+2026-02-18T04:38:57.656349Z  WARN voirc::irc_client: Dropping VOIRC_ROLE from unverified peer nick#0060
+2026-02-18T04:38:57.656462Z  WARN voirc::irc_client: Dropping VOIRC_ROLE from unverified peer nick#0060
+2026-02-18T04:38:57.697266Z  INFO voirc::irc_client: Server requires 4 PoW bits for nick registration
+2026-02-18T04:38:57.867211Z  INFO voirc::irc_server: Auth OK: nick#0060 pow=10 bits pubkey=4e8d261c...
+2026-02-18T04:38:57.867440Z  INFO voirc::irc_client: VOIRC_HELLO accepted: HELLO_OK pow_bits:10
+2026-02-18T04:38:58.157597Z  INFO voirc::gui: Joined: k (role: Peer)
+2026-02-18T04:38:58.157710Z  INFO voirc::gui: Joined: nick (role: Peer)
+2026-02-18T04:38:58.168846Z  WARN voirc::irc_server: VOIRC_HELLO PoW too weak for nick: 1 bits < 4 required
+2026-02-18T04:38:58.169142Z  WARN voirc::irc_client: Nick 'nick' PoW too weak — server requires 4 bits
+2026-02-18T04:38:58.198711Z  WARN voirc::irc_client: Dropping VOIRC_SYNC_REQ from unverified peer nick#0060
+2026-02-18T04:38:58.209153Z  WARN voirc::irc_client: Dropping VOIRC_SYNC_REQ from unverified peer nick#0060
+2026-02-18T04:38:58.223709Z  WARN voirc::irc_server: VOIRC_HELLO PoW too weak for k: 0 bits < 4 required
+2026-02-18T04:38:58.224005Z  WARN voirc::irc_client: Nick 'k' PoW too weak — server requires 4 bits
+2026-02-18T04:39:03.157083Z  INFO voirc::gui: Switching #general -> #gaming
+2026-02-18T04:39:04.053854Z  INFO voirc::gui: Switching #gaming -> #general
+2026-02-18T04:39:04.095662Z  INFO voirc::gui: Joined: k (role: Peer)
+2026-02-18T04:39:04.095783Z  INFO voirc::gui: Joined: nick (role: Peer)
+2026-02-18T04:39:04.096433Z  WARN voirc::irc_client: Dropping VOIRC_ROLE from unverified peer nick#0060
+2026-02-18T04:39:04.096592Z  WARN voirc::irc_client: Dropping VOIRC_ROLE from unverified peer nick#0060
+2026-02-18T04:39:04.136470Z  WARN voirc::irc_client: Dropping VOIRC_SYNC_REQ from unverified peer nick#0060
+2026-02-18T04:39:04.136600Z  WARN voirc::irc_client: Dropping VOIRC_SYNC_REQ from unverified peer nick#0060
+2026-02-18T04:39:04.146256Z  WARN voirc::irc_server: VOIRC_HELLO PoW too weak for nick: 1 bits < 4 required
+2026-02-18T04:39:04.146558Z  WARN voirc::irc_client: Nick 'nick' PoW too weak — server requires 4 bits
+2026-02-18T04:39:04.148175Z  WARN voirc::irc_server: VOIRC_HELLO PoW too weak for k: 0 bits < 4 required
+2026-02-18T04:39:04.148456Z  WARN voirc::irc_client: Nick 'k' PoW too weak — server requires 4 bits
+2026-02-18T04:39:15.995132Z  INFO voirc::irc_server: PoW difficulty changed by nick#0060: 4 → 0 bits
+2026-02-18T04:39:23.546214Z  WARN arboard::platform::linux::x11: Could not hand the clipboard contents over to the clipboard manager. The request timed out.
+2026-02-18T06:34:07.498555Z  INFO voirc: Loaded config for user: nick#0060
+2026-02-18T06:34:07.525368Z  INFO winit::platform_impl::linux::x11::window: Guessed window scale factor: 1
