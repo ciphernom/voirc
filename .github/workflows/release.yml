@@ -4,6 +4,9 @@ on:
   release:
     types: [created]
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -39,18 +42,21 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          # Audio & GUI deps
           sudo apt-get install -y libasound2-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev libgtk-3-dev
-          # Build tools for C++ crates (webrtc-audio-processing & opus)
           sudo apt-get install -y libclang-dev libopus-dev llvm-dev pkg-config
 
-      # WINDOWS SPECIFIC: Set up LLVM for Bindgen
-      # webrtc-audio-processing needs to find libclang.dll
-      - name: Setup Windows Environment
+      # WINDOWS SPECIFIC: Install Autotools for webrtc-audio-processing
+      - name: Install Windows Dependencies
         if: runner.os == 'Windows'
-        shell: bash
         run: |
-          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $GITHUB_ENV
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+          choco install -y make libtool autoconf automake
+
+      # MACOS SPECIFIC: Install Opus to avoid compiling it from source (which fails)
+      - name: Install MacOS Dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install opus pkg-config
 
       # Build the binary
       - name: Build Binary
