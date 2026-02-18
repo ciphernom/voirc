@@ -18,13 +18,25 @@ jobs:
             target: x86_64-unknown-linux-gnu
             name: voirc-linux
           - os: windows-latest
-            target: x86_64-pc-windows-gnu
+            target: x86_64-pc-windows-msvc
             name: voirc-windows.exe
           - os: macos-latest
             target: aarch64-apple-darwin
             name: voirc-macos
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # --- LINUX ---
+      - name: Install Linux Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev libgtk-3-dev
+          sudo apt-get install -y libclang-dev libopus-dev llvm-dev pkg-config build-essential autoconf automake libtool
+      # --- WINDOWS ---
       - name: Install Windows MSYS2 Tools
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
@@ -36,24 +48,41 @@ jobs:
             autoconf
             automake
             libtool
-            mingw-w64-x86_64-rust
             mingw-w64-x86_64-clang
             mingw-w64-x86_64-opus
             mingw-w64-x86_64-pkg-config
-            mingw-w64-x86_64-toolchain
           path-type: inherit
-      - name: Install Rust
-        if: runner.os != 'Windows'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      # --- LINUX ---
-      - name: Install Linux Dependencies
-        if: runner.os == 'Linux'
+      - name: Setup Windows Env and Shims
+        if: runner.os == 'Windows'
+        shell: powershell
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libspeechd-dev libxkbcommon-dev libssl-dev libgtk-3-dev
-          sudo apt-get install -y libclang-dev libopus-dev llvm-dev pkg-config build-essential autoconf automake libtool
+          # Create a shims directory
+          New-Item -ItemType Directory -Force -Path "C:\shims"
+
+          # Create libtoolize.bat shim
+          $libtoolize = "@echo off`r`nC:\msys64\usr\bin\bash.exe -l /usr/bin/libtoolize %*"
+          Set-Content -Path "C:\shims\libtoolize.bat" -Value $libtoolize
+
+          # Create aclocal.bat shim
+          $aclocal = "@echo off`r`nC:\msys64\usr\bin\bash.exe -l /usr/bin/aclocal %*"
+          Set-Content -Path "C:\shims\aclocal.bat" -Value $aclocal
+
+          # Create autoconf.bat shim
+          $autoconf = "@echo off`r`nC:\msys64\usr\bin\bash.exe -l /usr/bin/autoconf %*"
+          Set-Content -Path "C:\shims\autoconf.bat" -Value $autoconf
+
+          # Create automake.bat shim
+          $automake = "@echo off`r`nC:\msys64\usr\bin\bash.exe -l /usr/bin/automake %*"
+          Set-Content -Path "C:\shims\automake.bat" -Value $automake
+
+          # Add paths
+          echo "C:\shims" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "C:\msys64\usr\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+          # Set env vars
+          echo "LIBCLANG_PATH=C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "PKG_CONFIG_PATH=C:\msys64\mingw64\lib\pkgconfig" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       # --- MACOS ---
       - name: Install MacOS Dependencies
         if: runner.os == 'macOS'
@@ -65,13 +94,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
       - name: Build Binary (Windows)
         if: runner.os == 'Windows'
-        shell: msys2 {0}
-        env:
-          LIBCLANG_PATH: /mingw64/bin
-          PKG_CONFIG_PATH: /mingw64/lib/pkgconfig
-        run: |
-          export PATH="/mingw64/bin:$PATH"
-          cargo build --release --target x86_64-pc-windows-gnu
+        run: cargo build --release --target ${{ matrix.target }}
       - name: Rename Binary
         shell: bash
         run: |
