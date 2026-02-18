@@ -247,3 +247,227 @@ fn expand_template(template: &str, ctx: &CommandContext) -> String {
         .replace("{role}", ctx.role.as_str())
         .replace("{peers}", &ctx.peers.join(", "))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_command_not_command() {
+        let custom = CustomCommands::default();
+        let ctx = CommandContext {
+            nick: "test".to_string(),
+            channel: "#general".to_string(),
+            role: Role::Peer,
+            peers: vec![],
+        };
+        assert!(parse_command("hello world", &custom, &ctx).is_none());
+    }
+
+    #[test]
+    fn test_parse_command_help() {
+        let custom = CustomCommands::default();
+        let ctx = CommandContext {
+            nick: "test".to_string(),
+            channel: "#general".to_string(),
+            role: Role::Peer,
+            peers: vec![],
+        };
+        assert!(matches!(parse_command("/help", &custom, &ctx), Some(Command::Help)));
+        assert!(matches!(parse_command("/?", &custom, &ctx), Some(Command::Help)));
+    }
+
+    #[test]
+    fn test_parse_command_kick() {
+        let custom = CustomCommands::default();
+        let ctx = CommandContext {
+            nick: "test".to_string(),
+            channel: "#general".to_string(),
+            role: Role::Peer,
+            peers: vec![],
+        };
+        let result = parse_command("/kick baduser", &custom, &ctx);
+        assert!(matches!(result, Some(Command::Mod(ModAction::Kick(nick))) if nick == "baduser"));
+    }
+
+    #[test]
+    fn test_parse_command_ban() {
+        let custom = CustomCommands::default();
+        let ctx = CommandContext {
+            nick: "test".to_string(),
+            channel: "#general".to_string(),
+            role: Role::Peer,
+            peers: vec![],
+        };
+        let result = parse_command("/ban spammer", &custom, &ctx);
+        assert!(matches!(result, Some(Command::Mod(ModAction::Ban(nick))) if nick == "spammer"));
+    }
+
+    #[test]
+    fn test_parse_command_unban() {
+        let custom = CustomCommands::default();
+        let ctx = CommandContext {
+            nick: "test".to_string(),
+            channel: "#general".to_string(),
+            role: Role::Peer,
+            peers: vec![],
+        };
+        let result = parse_command("/unban reformed_user", &custom, &ctx);
+        assert!(matches!(result, Some(Command::Mod(ModAction::Unban(nick))) if nick == "reformed_user"));
+    }
+
+    #[test]
+    fn test_parse_command_promote() {
+        let custom = CustomCommands::default();
+        let ctx = CommandContext {
+            nick: "test".to_string(),
+            channel: "#general".to_string(),
+            role: Role::Peer,
+            peers: vec![],
+        };
+        let result = parse_command("/mod newmod", &custom, &ctx);
+        assert!(matches!(result, Some(Command::Mod(ModAction::Promote(nick))) if nick == "newmod"));
+    }
+
+    #[test]
+    fn test_parse_command_demote() {
+        let custom = CustomCommands::default();
+        let ctx = CommandContext {
+            nick: "test".to_string(),
+            channel: "#general".to_string(),
+            role: Role::Peer,
+            peers: vec![],
+        };
+        let result = parse_command("/unmod exmod", &custom, &ctx);
+        assert!(matches!(result, Some(Command::Mod(ModAction::Demote(nick))) if nick == "exmod"));
+    }
+
+    #[test]
+    fn test_parse_command_listbanned() {
+        let custom = CustomCommands::default();
+        let ctx = CommandContext {
+            nick: "test".to_string(),
+            channel: "#general".to_string(),
+            role: Role::Peer,
+            peers: vec![],
+        };
+        assert!(matches!(parse_command("/listbanned", &custom, &ctx), Some(Command::ListBanned)));
+        assert!(matches!(parse_command("/bans", &custom, &ctx), Some(Command::ListBanned)));
+    }
+
+    #[test]
+    fn test_parse_command_role() {
+        let custom = CustomCommands::default();
+        let ctx = CommandContext {
+            nick: "test".to_string(),
+            channel: "#general".to_string(),
+            role: Role::Peer,
+            peers: vec![],
+        };
+        assert!(matches!(parse_command("/role", &custom, &ctx), Some(Command::ShowRole)));
+    }
+
+    #[test]
+    fn test_parse_command_peers() {
+        let custom = CustomCommands::default();
+        let ctx = CommandContext {
+            nick: "test".to_string(),
+            channel: "#general".to_string(),
+            role: Role::Peer,
+            peers: vec![],
+        };
+        assert!(matches!(parse_command("/peers", &custom, &ctx), Some(Command::ListPeers)));
+        assert!(matches!(parse_command("/who", &custom, &ctx), Some(Command::ListPeers)));
+    }
+
+    #[test]
+    fn test_parse_command_unknown() {
+        let custom = CustomCommands::default();
+        let ctx = CommandContext {
+            nick: "test".to_string(),
+            channel: "#general".to_string(),
+            role: Role::Peer,
+            peers: vec![],
+        };
+        // Fix: Expect "/unknowncommand" since the parser keeps the slash
+        assert!(matches!(parse_command("/unknowncommand", &custom, &ctx), Some(Command::Unknown(cmd)) if cmd == "/unknowncommand"));
+    }
+
+    #[test]
+    fn test_check_permission_kick_ban_host() {
+        assert!(check_permission(Role::Host, &ModAction::Kick("user".to_string())).is_ok());
+        assert!(check_permission(Role::Host, &ModAction::Ban("user".to_string())).is_ok());
+        assert!(check_permission(Role::Host, &ModAction::Unban("user".to_string())).is_ok());
+    }
+
+    #[test]
+    fn test_check_permission_kick_ban_mod() {
+        assert!(check_permission(Role::Mod, &ModAction::Kick("user".to_string())).is_ok());
+        assert!(check_permission(Role::Mod, &ModAction::Ban("user".to_string())).is_ok());
+        assert!(check_permission(Role::Mod, &ModAction::Unban("user".to_string())).is_ok());
+    }
+
+    #[test]
+    fn test_check_permission_kick_ban_peer_fails() {
+        assert!(check_permission(Role::Peer, &ModAction::Kick("user".to_string())).is_err());
+        assert!(check_permission(Role::Peer, &ModAction::Ban("user".to_string())).is_err());
+        assert!(check_permission(Role::Peer, &ModAction::Unban("user".to_string())).is_err());
+    }
+
+    #[test]
+    fn test_check_permission_promote_host_only() {
+        assert!(check_permission(Role::Host, &ModAction::Promote("user".to_string())).is_ok());
+        assert!(check_permission(Role::Host, &ModAction::Demote("user".to_string())).is_ok());
+
+        assert!(check_permission(Role::Mod, &ModAction::Promote("user".to_string())).is_err());
+        assert!(check_permission(Role::Mod, &ModAction::Demote("user".to_string())).is_err());
+
+        assert!(check_permission(Role::Peer, &ModAction::Promote("user".to_string())).is_err());
+        assert!(check_permission(Role::Peer, &ModAction::Demote("user".to_string())).is_err());
+    }
+
+    #[test]
+    fn test_help_text_peer() {
+        let custom = CustomCommands::default();
+        let help = help_text(Role::Peer, &custom);
+
+        // Fix: Logic inverted. Should check that it does NOT contain kick.
+        assert!(!help.iter().any(|l| l.contains("/kick")));
+        assert!(!help.iter().any(|l| l.contains("/mod")));
+        assert!(help.iter().any(|l| l.contains("/help")));
+    }
+
+    #[test]
+    fn test_help_text_mod() {
+        let custom = CustomCommands::default();
+        let help = help_text(Role::Mod, &custom);
+
+        assert!(help.iter().any(|l| l.contains("/kick")));
+        assert!(help.iter().any(|l| l.contains("/ban")));
+        assert!(!help.iter().any(|l| l.contains("/mod")));
+    }
+
+    #[test]
+    fn test_help_text_host() {
+        let custom = CustomCommands::default();
+        let help = help_text(Role::Host, &custom);
+
+        assert!(help.iter().any(|l| l.contains("/kick")));
+        assert!(help.iter().any(|l| l.contains("/mod")));
+    }
+
+    #[test]
+    fn test_expand_template() {
+        let ctx = CommandContext {
+            nick: "alice".to_string(),
+            channel: "#general".to_string(),
+            role: Role::Host,
+            peers: vec!["bob".to_string(), "charlie".to_string()],
+        };
+
+        assert_eq!(expand_template("Hello {nick}", &ctx), "Hello alice");
+        assert_eq!(expand_template("In {channel}", &ctx), "In #general");
+        assert_eq!(expand_template("Your role is {role}", &ctx), "Your role is host");
+        assert_eq!(expand_template("Peers: {peers}", &ctx), "Peers: bob, charlie");
+    }
+}

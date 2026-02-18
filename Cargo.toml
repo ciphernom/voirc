@@ -17,6 +17,7 @@ webrtc = "0.11"
 # Audio
 cpal = "0.15"
 opus = "0.3"
+webrtc-audio-processing = { version = "~0.5", features = ["bundled"] }
 
 # Terminal UI
 ratatui = "0.28"

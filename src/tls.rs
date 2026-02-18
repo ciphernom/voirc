@@ -154,3 +154,60 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAllVerifier {
             .supported_schemes()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sha256_fingerprint() {
+        let test_data = b"test certificate data";
+        let fp = sha256_fingerprint(test_data);
+        // SHA256 produces 64 hex characters
+        assert_eq!(fp.len(), 64);
+        // Should be all hex characters
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_sha256_fingerprint_deterministic() {
+        let test_data = b"same data";
+        let fp1 = sha256_fingerprint(test_data);
+        let fp2 = sha256_fingerprint(test_data);
+        assert_eq!(fp1, fp2);
+    }
+
+    #[test]
+    fn test_sha256_fingerprint_different_inputs() {
+        let data1 = b"data1";
+        let data2 = b"data2";
+        let fp1 = sha256_fingerprint(data1);
+        let fp2 = sha256_fingerprint(data2);
+        assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn test_cert_info_fields() {
+        let info = CertInfo {
+            cert_der: vec![1, 2, 3, 4],
+            key_der: vec![5, 6, 7, 8],
+            fingerprint: "abc123".to_string(),
+        };
+        assert_eq!(info.cert_der, vec![1, 2, 3, 4]);
+        assert_eq!(info.key_der, vec![5, 6, 7, 8]);
+        assert_eq!(info.fingerprint, "abc123");
+    }
+
+    #[test]
+    fn test_cert_info_clone() {
+        let info = CertInfo {
+            cert_der: vec![1, 2, 3],
+            key_der: vec![4, 5, 6],
+            fingerprint: "test".to_string(),
+        };
+        let cloned = info.clone();
+        assert_eq!(info.cert_der, cloned.cert_der);
+        assert_eq!(info.key_der, cloned.key_der);
+        assert_eq!(info.fingerprint, cloned.fingerprint);
+    }
+}

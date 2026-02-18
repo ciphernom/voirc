@@ -61,3 +61,105 @@ pub async fn should_connect_to(
 
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Role;
+    use crate::state::AppState;
+    use std::sync::Arc;
+
+    // Helper is now async and does not start its own runtime
+    async fn make_state_with_peers(peers: Vec<(&'static str, Role)>) -> Arc<AppState> {
+        let state = AppState::new();
+        for (nick, role) in peers {
+            state.set_peer_role(nick, role).await;
+        }
+        state
+    }
+
+    #[tokio::test]
+    async fn test_superpeer_to_superpeer_connect() {
+        let state = make_state_with_peers(vec![
+            ("alice", Role::Host),
+            ("bob", Role::Mod),
+        ]).await;
+
+        // Alice (Host) should connect to Bob (Mod) - both superpeers
+        let should_connect = should_connect_to(&state, "alice", Role::Host, "bob", Role::Mod).await;
+        assert!(should_connect);
+    }
+
+    #[tokio::test]
+    async fn test_peer_to_superpeer_connect() {
+        let state = make_state_with_peers(vec![
+            ("alice", Role::Host),
+            ("bob", Role::Peer),
+        ]).await;
+
+        // Bob (Peer) should connect to Alice (Host) - peer to superpeer
+        let should_connect = should_connect_to(&state, "bob", Role::Peer, "alice", Role::Host).await;
+        assert!(should_connect);
+    }
+
+    #[tokio::test]
+    async fn test_superpeer_accepts_peer_connection() {
+        let state = make_state_with_peers(vec![
+            ("alice", Role::Host),
+            ("bob", Role::Peer),
+        ]).await;
+
+        // Alice (Host) should accept connection from Bob (Peer)
+        let should_connect = should_connect_to(&state, "alice", Role::Host, "bob", Role::Peer).await;
+        assert!(should_connect);
+    }
+
+    #[tokio::test]
+    async fn test_peer_to_peer_no_connect_with_superpeer_present() {
+        let state = make_state_with_peers(vec![
+            ("alice", Role::Host),
+            ("bob", Role::Peer),
+            ("charlie", Role::Peer),
+        ]).await;
+
+        // Bob and Charlie (both peers) should NOT connect directly when superpeer exists
+        let should_connect = should_connect_to(&state, "bob", Role::Peer, "charlie", Role::Peer).await;
+        assert!(!should_connect);
+    }
+
+    #[tokio::test]
+    async fn test_peer_to_peer_fallback_no_superpeers() {
+        let state = make_state_with_peers(vec![
+            ("alice", Role::Peer),
+            ("bob", Role::Peer),
+        ]).await;
+
+        // When no superpeers exist, peers should connect directly (full mesh fallback)
+        let should_connect = should_connect_to(&state, "alice", Role::Peer, "bob", Role::Peer).await;
+        assert!(should_connect);
+    }
+
+    #[tokio::test]
+    async fn test_mod_to_mod_connect() {
+        let state = make_state_with_peers(vec![
+            ("alice", Role::Mod),
+            ("bob", Role::Mod),
+        ]).await;
+
+        // Both mods are superpeers, should connect
+        let should_connect = should_connect_to(&state, "alice", Role::Mod, "bob", Role::Mod).await;
+        assert!(should_connect);
+    }
+
+    #[tokio::test]
+    async fn test_peer_to_mod_connect() {
+        let state = make_state_with_peers(vec![
+            ("alice", Role::Mod),
+            ("bob", Role::Peer),
+        ]).await;
+
+        // Peer should connect to mod
+        let should_connect = should_connect_to(&state, "bob", Role::Peer, "alice", Role::Mod).await;
+        assert!(should_connect);
+    }
+}
